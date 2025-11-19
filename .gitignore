@@ -1,0 +1,42 @@
+# Rust
+target/
+**/*.rs.bk
+*.pdb
+
+# Model files (large)
+*.mpk
+*.safetensors
+*.bin
+*.pt
+*.pth
+
+# Output directories
+ingest_output/
+dataset_cache/
+sphere_results/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+.venv
+
+# Documentation builds
+docs/_build/
+site/
+
