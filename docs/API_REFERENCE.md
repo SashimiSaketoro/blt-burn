@@ -55,14 +55,14 @@ blt-burn/
 │   ├── pretokenize.rs     # Multimodal pre-tokenization framework
 │   ├── patcher.rs         # Entropy calculation & patch extraction
 │   ├── dataset.rs         # FineWeb-Edu and dataset utilities
-│   ├── weights.rs         # Weight loading and management
 │   └── lib.rs             # Public API exports
 ├── docs/
 │   ├── API_REFERENCE.md   # This file
 │   └── PRENORM_SIGNAL_SUMMARY.md
 └── scripts/
     ├── water_filling_integration.py
-    └── upload_model.py
+    ├── demo_prenorm_signal.py
+    └── inspect_sphere_result.py
 ```
 
 ---
@@ -497,8 +497,9 @@ fn process_image(image_path: &str) -> anyhow::Result<()> {
 ### Hugging Face Repository
 
 ```bash
-# Automatic download (via hf-hub crate)
-cargo run --bin ingest  # Downloads on first run
+# Automatic download at build time
+cargo build  # Downloads model during build
+cargo run --bin ingest  # Uses cached model
 ```
 
 **Repository**: `SashimiSaketoro/entropy_burn`  

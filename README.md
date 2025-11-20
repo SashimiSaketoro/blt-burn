@@ -59,14 +59,14 @@ let prominence = output.embedding_norms;      // For water-filling
 
 ### Download Model
 
-The model is available on HuggingFace:
+The model is automatically downloaded at build time from HuggingFace:
 
 ```bash
-# Automatic (via ingest binary)
-cargo run --bin ingest
+# Build downloads the model automatically
+cargo build --release
 
-# Or manual download
-python3 scripts/upload_model.py --file blt_entropy_model.mpk
+# Or run any binary that needs the model
+cargo run --bin ingest
 ```
 
 **Repository**: [SashimiSaketoro/entropy_burn](https://huggingface.co/SashimiSaketoro/entropy_burn)  
@@ -99,12 +99,13 @@ blt-burn/
 │   ├── patcher.rs        # Entropy & patch extraction
 │   ├── dataset.rs        # FineWeb-Edu utilities
 │   └── bin/              # Binary executables
-│       ├── convert.rs    # Safetensors → MPK converter
 │       ├── ingest.rs     # Main ingestion pipeline
-│       └── verify_weights.rs  # Weight verification
+│       ├── pretokenize_demo.rs  # Pre-tokenization demo
+│       └── test_tokenizer.rs    # Tokenizer testing
 ├── scripts/
-│   ├── upload_model.py   # HF upload utility
-│   └── water_filling_integration.py  # Python integration
+│   ├── water_filling_integration.py  # Python sphere algorithms
+│   ├── demo_prenorm_signal.py       # Pre-norm signal demo
+│   └── inspect_sphere_result.py     # Sphere result inspector
 ├── docs/                 # Documentation
 └── Cargo.toml
 ```
