@@ -91,6 +91,9 @@ Low L2 Norm  → Low Pressure  → Demotes to Inner Shells
    - Radial promotion (70%): move to outer shell
 5. Iterate until equilibrium
 
+**Topology Note (Hollow Core):**
+To prevent attention saturation at the center, we enforce a **Hollow Core** (minimum radius, e.g., R=32). No points exist in the core; the "mantle" begins at R=32 and expands outwards ("Infinite Crust") to accommodate high-prominence outliers.
+
 ### Method 2: THRML Energy-Based Water-Filling
 
 Uses L2 norms as **kinetic energy**:

@@ -124,7 +124,7 @@ Automatic format detection based on magic bytes:
 - ELF binaries (`7F ELF`), ZIP archives (`PK`)
 - Code files (shebang, import statements)
 
-#### Currently Supported
+#### Video Support
 - **Video**: Full frame extraction via FFmpeg (automatically installed during build if missing)
   - Supports all major codecs: H.264, H.265/HEVC, VP8, VP9, AV1, MPEG-4, MPEG-2, and more
   - FFmpeg is required and will be automatically installed during build if not found
