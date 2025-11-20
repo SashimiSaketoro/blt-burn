@@ -52,6 +52,10 @@ pub fn detect_modality(data: &[u8]) -> PreTokenizerType {
         return PreTokenizerType::Image { patch_size: 16, stride: 16 };
     } else if data.starts_with(b"\x89PNG") { // PNG
         return PreTokenizerType::Image { patch_size: 16, stride: 16 };
+    } else if data.starts_with(b"%PDF-") { // PDF
+        return PreTokenizerType::Pdf { extract_text: true };
+    } else if data.len() > 8 && &data[4..8] == b"ftyp" { // MP4/Video
+        return PreTokenizerType::Video { frame_rate: 30 };
     } else if data.starts_with(b"RIFF") && data.len() > 12 && &data[8..12] == b"WAVE" { // WAV
         return PreTokenizerType::Audio { frame_size: 160, sample_rate: 16000 };
     } else if data.starts_with(b"ID3") || (data.starts_with(b"\xFF\xFB") || data.starts_with(b"\xFF\xF3") || data.starts_with(b"\xFF\xF2")) { // MP3 (ID3 or sync)
@@ -455,6 +459,39 @@ impl ModalityPreTokenizer for CodePreTokenizer {
     }
 }
 
+/// PDF Pre-Tokenizer (Placeholder)
+pub struct PdfPreTokenizer {
+    extract_text: bool,
+}
+
+impl ModalityPreTokenizer for PdfPreTokenizer {
+    fn pre_tokenize(&self, _data: &[u8]) -> Result<Vec<ByteSegment>> {
+        // Requires 'pdf' crate. Returning empty for now.
+        // To implement: use pdf::file::File...
+        Err(anyhow::anyhow!("PDF support requires 'pdf' crate (add to Cargo.toml)"))
+    }
+    
+    fn modality(&self) -> &str {
+        "pdf"
+    }
+}
+
+/// Video Pre-Tokenizer (Placeholder)
+pub struct VideoPreTokenizer {
+    frame_rate: u32,
+}
+
+impl ModalityPreTokenizer for VideoPreTokenizer {
+    fn pre_tokenize(&self, _data: &[u8]) -> Result<Vec<ByteSegment>> {
+        // Requires 'ffmpeg-next' crate.
+        Err(anyhow::anyhow!("Video support requires 'ffmpeg-next' crate"))
+    }
+    
+    fn modality(&self) -> &str {
+        "video"
+    }
+}
+
 /// Pre-tokenizer factory for creating the appropriate pre-tokenizer
 pub enum PreTokenizerType {
     TextSimple,
@@ -463,6 +500,8 @@ pub enum PreTokenizerType {
     Image { patch_size: usize, stride: usize },
     Audio { frame_size: usize, sample_rate: u32 },
     Code { language: String },
+    Pdf { extract_text: bool },
+    Video { frame_rate: u32 },
 }
 
 impl PreTokenizerType {
@@ -485,6 +524,12 @@ impl PreTokenizerType {
             }
             PreTokenizerType::Code { language } => {
                 Ok(Box::new(CodePreTokenizer::new(language.clone())))
+            }
+            PreTokenizerType::Pdf { extract_text } => {
+                Ok(Box::new(PdfPreTokenizer { extract_text: *extract_text }))
+            }
+            PreTokenizerType::Video { frame_rate } => {
+                Ok(Box::new(VideoPreTokenizer { frame_rate: *frame_rate }))
             }
         }
     }
