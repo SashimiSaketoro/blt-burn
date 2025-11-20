@@ -252,12 +252,28 @@ let pretokenizer = PreTokenizerType::Pdf {
 
 #### Video Pre-Tokenizer
 ```rust
-// Options: ffmpeg-next (system dep) or symphonia (pure-Rust)
 let pretokenizer = PreTokenizerType::Video { 
     frame_rate: 30 
 }.create()?;
-// Currently returns error, implement with chosen backend
+
+// Current capabilities:
+// - Extracts audio tracks using Symphonia (pure Rust)
+// - Returns metadata about video codec limitations
+// - Does NOT extract video frames due to limited pure Rust codec support
 ```
+
+**Implementation Details**:
+- **Audio extraction**: Works via Symphonia for audio tracks in video containers
+- **Video frames**: Not supported - pure Rust decoders only cover:
+  - AV1 (via rav1d - not integrated)
+  - H.264 Baseline (via h264-decoder - not integrated)
+  - No HEVC, VP8, VP9, or H.264 Main/High profile support
+- **Returns**: Audio segments + metadata explaining video limitations
+
+**Alternatives**:
+1. Preprocess videos with ffmpeg to extract frames as images
+2. Use video-rs with FFmpeg dependency for full codec support
+3. Wait for rust-av ecosystem to mature
 
 #### Binary Pre-Tokenizer
 ```rust

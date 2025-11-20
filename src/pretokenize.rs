@@ -537,28 +537,84 @@ impl ModalityPreTokenizer for PdfPreTokenizer {
     }
 }
 
-/// Video Pre-Tokenizer using Symphonia (Demux Audio only for now)
+/// Video Pre-Tokenizer
+/// 
+/// Current approach:
+/// 1. Try to extract audio track using Symphonia (pure Rust)
+/// 2. For video frames, we acknowledge the limitation:
+///    - Pure Rust video decoders are extremely limited
+///    - rav1d only handles AV1, h264-decoder only handles Baseline H.264
+///    - Most real-world videos use Main/High profile H.264 or HEVC
+/// 3. We provide metadata indicating this limitation
 pub struct VideoPreTokenizer {
     frame_rate: u32,
 }
 
 impl ModalityPreTokenizer for VideoPreTokenizer {
     fn pre_tokenize(&self, data: &[u8]) -> Result<Vec<ByteSegment>> {
-        // Try to extract audio track using Symphonia
-        // This reuses AudioPreTokenizer logic effectively, but with knowledge it's video
-        let audio_tokenizer = AudioPreTokenizer::new(160, 44100); // Defaults
+        let mut segments = Vec::new();
+        
+        // 1. Try to extract audio track using Symphonia
+        let audio_tokenizer = AudioPreTokenizer::new(160, 44100);
         match audio_tokenizer.pre_tokenize(data) {
-            Ok(segments) => Ok(segments),
+            Ok(audio_segments) => {
+                // Successfully extracted audio - add with video context
+                for mut seg in audio_segments {
+                    if let Some(ref mut metadata) = seg.metadata {
+                        if let Some(ref mut extra) = metadata.extra {
+                            extra["source"] = serde_json::Value::String("video_audio_track".into());
+                        }
+                    }
+                    segments.push(seg);
+                }
+            },
             Err(_) => {
-                // Fallback: Return raw video chunks? 
-                // Or just empty if no audio.
-                Err(anyhow::anyhow!("Video decoding not fully supported (audio extraction failed)"))
+                // No audio track found or extraction failed
             }
         }
+        
+        // 2. For video frames, we acknowledge the limitation
+        // Pure Rust decoders are not comprehensive enough yet
+        // Options:
+        // - rav1d for AV1 (but most videos aren't AV1)
+        // - h264-decoder for H.264 Baseline (but most use Main/High profile)
+        // - No pure Rust HEVC, VP8, VP9 decoders of production quality
+        
+        // For now, we return a metadata segment indicating the limitation
+        segments.push(ByteSegment {
+            bytes: Vec::new(), // Empty - no frame data extracted
+            label: Some("video_frames_not_extracted".to_string()),
+            metadata: Some(SegmentMetadata {
+                start_offset: 0,
+                end_offset: data.len(),
+                confidence: 0.0,
+                extra: Some(serde_json::json!({
+                    "note": "Pure Rust video frame extraction not yet supported",
+                    "reason": "Limited codec support in pure Rust ecosystem",
+                    "alternatives": [
+                        "Use ffmpeg via video-rs for comprehensive codec support",
+                        "Extract frames externally and process as images",
+                        "Wait for rust-av ecosystem to mature"
+                    ],
+                    "supported_codecs_pure_rust": [
+                        "AV1 via rav1d (not integrated)",
+                        "H.264 Baseline via h264-decoder (not integrated)"
+                    ],
+                    "file_size_bytes": data.len(),
+                    "frame_rate_requested": self.frame_rate
+                })),
+            }),
+        });
+        
+        if segments.is_empty() {
+            return Err(anyhow::anyhow!("No extractable content from video file"));
+        }
+        
+        Ok(segments)
     }
     
     fn modality(&self) -> &str {
-        "video_audio"
+        "video"
     }
 }
 

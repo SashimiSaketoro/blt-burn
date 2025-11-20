@@ -125,7 +125,7 @@ Automatic format detection based on magic bytes:
 
 #### Planned Support (Stubs Available)
 - **PDF**: Text/image extraction (requires `pdf` crate)
-- **Video**: Frame extraction (requires `ffmpeg-next` or pure-Rust alternatives)
+- **Video**: Frame extraction (limited by pure-Rust codec availability - currently extracts audio only)
 - **Binary**: ELF section parsing (requires `goblin` crate)
 
 ### Pure-Rust Philosophy
