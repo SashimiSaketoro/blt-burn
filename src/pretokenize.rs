@@ -1,6 +1,5 @@
 use anyhow::Result;
 use tokenizers::Tokenizer as HFTokenizer;
-use image::{GenericImageView, Pixel};
 use std::io::Cursor;
 use tree_sitter::{Parser, Language};
 
@@ -331,14 +330,14 @@ impl ModalityPreTokenizer for CodePreTokenizer {
     fn pre_tokenize(&self, data: &[u8]) -> Result<Vec<ByteSegment>> {
         let mut parser = Parser::new();
         
-        let lang = match self.language.as_str() {
-            "rust" => tree_sitter_rust::language(),
-            "python" => tree_sitter_python::language(),
+        let lang: Language = match self.language.as_str() {
+            "rust" => tree_sitter_rust::LANGUAGE.into(),
+            "python" => tree_sitter_python::LANGUAGE.into(),
             // Fallback or error for unsupported langs
             _ => return Err(anyhow::anyhow!("Unsupported language for AST parsing")),
         };
         
-        parser.set_language(lang)?;
+        parser.set_language(&lang)?;
         
         // Tree-sitter expects string-like input usually, but works on bytes
         let tree = parser.parse(data, None)
