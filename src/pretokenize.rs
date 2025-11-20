@@ -43,16 +43,33 @@ pub struct SegmentMetadata {
 
 /// Auto-detect content type and return appropriate PreTokenizerType
 pub fn detect_modality(data: &[u8]) -> PreTokenizerType {
-    if data.len() > 4 {
-        // Magic bytes check
-        if data.starts_with(b"\xFF\xD8") || data.starts_with(b"\x89PNG") {
-            return PreTokenizerType::Image { patch_size: 16, stride: 16 }; // 16x16 standard patches
-        } else if data.starts_with(b"RIFF") && &data[8..12] == b"WAVE" {
-            return PreTokenizerType::Audio { frame_size: 160, sample_rate: 16000 };
-        }
+    if data.len() < 4 {
+        return PreTokenizerType::TextRaw;
+    }
+
+    // Magic bytes check
+    if data.starts_with(b"\xFF\xD8") { // JPEG
+        return PreTokenizerType::Image { patch_size: 16, stride: 16 };
+    } else if data.starts_with(b"\x89PNG") { // PNG
+        return PreTokenizerType::Image { patch_size: 16, stride: 16 };
+    } else if data.starts_with(b"RIFF") && data.len() > 12 && &data[8..12] == b"WAVE" { // WAV
+        return PreTokenizerType::Audio { frame_size: 160, sample_rate: 16000 };
+    } else if data.starts_with(b"ID3") || (data.starts_with(b"\xFF\xFB") || data.starts_with(b"\xFF\xF3") || data.starts_with(b"\xFF\xF2")) { // MP3 (ID3 or sync)
+        // MP3 decoding needs more deps, defaulting to Audio with standard assumption or failing later
+        return PreTokenizerType::Audio { frame_size: 160, sample_rate: 44100 };
+    }
+
+    // Heuristics for code
+    if data.starts_with(b"#!/") || data.windows(7).any(|w| w == b"import ") || data.windows(3).any(|w| w == b"fn ") {
+         // Ideally we'd detect language, but defaulting to Python or Rust based on hints
+         if data.windows(4).any(|w| w == b"def ") {
+             return PreTokenizerType::Code { language: "python".to_string() };
+         }
+         if data.windows(3).any(|w| w == b"fn ") {
+             return PreTokenizerType::Code { language: "rust".to_string() };
+         }
     }
     
-    // Heuristic for code vs text could go here, but default to RawText for now
     PreTokenizerType::TextRaw
 }
 
@@ -162,7 +179,7 @@ impl ModalityPreTokenizer for RawTextPreTokenizer {
 }
 
 /// Image pre-tokenizer using patch-based segmentation on RAW PIXELS
-/// Enhanced with simple entropy-based tagging capability
+/// Enhanced with adaptive entropy-based merging
 pub struct ImagePreTokenizer {
     patch_size: usize,
     stride: usize,
@@ -202,21 +219,18 @@ impl ModalityPreTokenizer for ImagePreTokenizer {
         let rgb = img.to_rgb8();
         let (width, height) = rgb.dimensions();
         
-        let mut segments = Vec::new();
+        let mut initial_patches = Vec::new();
         
-        // Iterate over patches
+        // Step 1: Extract standard grid patches
         for y in (0..height).step_by(self.stride) {
             for x in (0..width).step_by(self.stride) {
-                // Extract patch
                 let mut patch_bytes = Vec::with_capacity(self.patch_size * self.patch_size * 3);
-                
-                // Handle boundary conditions
                 for py in 0..self.patch_size as u32 {
                     for px in 0..self.patch_size as u32 {
                         let pixel = if x + px < width && y + py < height {
                             *rgb.get_pixel(x + px, y + py)
                         } else {
-                            image::Rgb([0, 0, 0]) // Zero padding
+                            image::Rgb([0, 0, 0])
                         };
                         patch_bytes.extend_from_slice(&pixel.0);
                     }
@@ -224,29 +238,48 @@ impl ModalityPreTokenizer for ImagePreTokenizer {
                 
                 let entropy = Self::compute_patch_entropy(&patch_bytes);
                 
-                // Tag low entropy patches
-                let label = if entropy < 2.0 { "image_patch_low_entropy" } else { "image_patch" };
-
-                segments.push(ByteSegment {
+                initial_patches.push(ByteSegment {
                     bytes: patch_bytes,
-                    label: Some(label.to_string()),
+                    label: Some("image_patch".to_string()),
                     metadata: Some(SegmentMetadata {
-                        start_offset: (y * width + x) as usize * 3, // Approximate offset
+                        start_offset: (y * width + x) as usize * 3, 
                         end_offset: ((y + self.patch_size as u32) * width + x + self.patch_size as u32) as usize * 3,
                         confidence: 1.0,
                         extra: Some(serde_json::json!({
-                            "x": x,
-                            "y": y,
-                            "width": width,
-                            "height": height,
-                            "local_entropy": entropy
+                            "x": x, "y": y, "width": width, "height": height, "local_entropy": entropy
                         })),
                     }),
                 });
             }
         }
+
+        // Step 2: Adaptive Merging
+        if initial_patches.is_empty() { return Ok(vec![]); }
         
-        Ok(segments)
+        let mut merged = vec![initial_patches[0].clone()];
+        
+        for patch in initial_patches.into_iter().skip(1) {
+            let last_meta = merged.last().unwrap().metadata.as_ref().unwrap().extra.as_ref().unwrap();
+            let last_entropy = last_meta["local_entropy"].as_f64().unwrap_or(0.0) as f32;
+            
+            let this_meta = patch.metadata.as_ref().unwrap().extra.as_ref().unwrap();
+            let this_entropy = this_meta["local_entropy"].as_f64().unwrap_or(0.0) as f32;
+            
+            // Merge threshold: low entropy implies uniform region
+            if (last_entropy + this_entropy) / 2.0 < 1.5 { 
+                let last_seg = merged.last_mut().unwrap();
+                last_seg.bytes.extend(&patch.bytes);
+                // Update metadata to reflect merged region
+                if let Some(meta) = &mut last_seg.metadata {
+                    meta.end_offset = patch.metadata.as_ref().unwrap().end_offset;
+                }
+                // We keep the label as "image_patch" but it's now a "super-patch"
+            } else {
+                merged.push(patch);
+            }
+        }
+        
+        Ok(merged)
     }
     
     fn modality(&self) -> &str {
@@ -347,32 +380,60 @@ impl ModalityPreTokenizer for CodePreTokenizer {
         let mut segments = Vec::new();
         let mut cursor = root.walk();
         
-        // Traverse the tree. 
-        // Strategy: Iterate over top-level children (functions, structs, imports)
-        // and treat them as segments.
-        for child in root.children(&mut cursor) {
-            let start = child.start_byte();
-            let end = child.end_byte();
+        // Traverse the tree
+        let mut reached_leaf = false;
+        while !reached_leaf {
+            let node = cursor.node();
+            let kind = node.kind();
             
-            // Only process valid byte ranges
-            if end <= data.len() {
-                segments.push(ByteSegment {
-                    bytes: data[start..end].to_vec(),
-                    label: Some(child.kind().to_string()),
-                    metadata: Some(SegmentMetadata {
-                        start_offset: start,
-                        end_offset: end,
-                        confidence: 1.0,
-                        extra: Some(serde_json::json!({
-                            "node_type": child.kind(),
-                            "is_named": child.is_named()
-                        })),
-                    }),
-                });
+            // Filter for "interesting" nodes that represent semantic units
+            // Rust: function_item, struct_item, impl_item, module
+            // Python: function_definition, class_definition, import_statement
+            let is_semantic_unit = match self.language.as_str() {
+                "rust" => matches!(kind, "function_item" | "struct_item" | "impl_item" | "mod_item"),
+                "python" => matches!(kind, "function_definition" | "class_definition" | "import_statement"),
+                _ => node.is_named(), // Fallback
+            };
+            
+            if is_semantic_unit {
+                let start = node.start_byte();
+                let end = node.end_byte();
+                if end <= data.len() {
+                    segments.push(ByteSegment {
+                        bytes: data[start..end].to_vec(),
+                        label: Some(kind.to_string()),
+                        metadata: Some(SegmentMetadata {
+                            start_offset: start,
+                            end_offset: end,
+                            confidence: 1.0,
+                            extra: Some(serde_json::json!({
+                                "node_type": kind,
+                                "is_named": node.is_named()
+                            })),
+                        }),
+                    });
+                }
+                // Skip children of this node as we captured the whole unit
+                if !cursor.goto_next_sibling() {
+                    if !cursor.goto_parent() { break; }
+                    while !cursor.goto_next_sibling() {
+                        if !cursor.goto_parent() { reached_leaf = true; break; }
+                    }
+                }
+            } else {
+                // Not a unit, descend
+                if !cursor.goto_first_child() {
+                    if !cursor.goto_next_sibling() {
+                         if !cursor.goto_parent() { break; }
+                         while !cursor.goto_next_sibling() {
+                             if !cursor.goto_parent() { reached_leaf = true; break; }
+                         }
+                    }
+                }
             }
         }
         
-        // If no top-level structure found (e.g. snippet), fallback to whole block or lines
+        // If no top-level structure found, fallback
         if segments.is_empty() {
              segments.push(ByteSegment {
                 bytes: data.to_vec(),
