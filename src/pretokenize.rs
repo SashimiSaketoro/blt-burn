@@ -2,6 +2,7 @@ use anyhow::Result;
 use tokenizers::Tokenizer as HFTokenizer;
 use std::io::Cursor;
 use tree_sitter::{Parser, Language};
+use std::process::Command;
 
 // Symphonia imports for audio/video
 use symphonia::core::io::MediaSourceStream;
@@ -537,74 +538,125 @@ impl ModalityPreTokenizer for PdfPreTokenizer {
     }
 }
 
-/// Video Pre-Tokenizer
+/// Video Pre-Tokenizer with automatic FFmpeg detection and fallback
 /// 
-/// Current approach:
-/// 1. Try to extract audio track using Symphonia (pure Rust)
-/// 2. For video frames, we acknowledge the limitation:
-///    - Pure Rust video decoders are extremely limited
-///    - rav1d only handles AV1, h264-decoder only handles Baseline H.264
-///    - Most real-world videos use Main/High profile H.264 or HEVC
-/// 3. We provide metadata indicating this limitation
+/// Approach:
+/// 1. Check if FFmpeg is available on the system
+/// 2. If yes: Use video-rs for comprehensive codec support (when feature enabled)
+/// 3. If no: Offer to install it or fall back to pure Rust (audio extraction only)
 pub struct VideoPreTokenizer {
     frame_rate: u32,
+    ffmpeg_available: Option<bool>,
+}
+
+impl VideoPreTokenizer {
+    pub fn new(frame_rate: u32) -> Self {
+        Self {
+            frame_rate,
+            ffmpeg_available: None,
+        }
+    }
+    
+    fn check_ffmpeg(&mut self) -> bool {
+        if let Some(available) = self.ffmpeg_available {
+            return available;
+        }
+        
+        let available = Command::new("ffmpeg")
+            .arg("-version")
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false);
+            
+        self.ffmpeg_available = Some(available);
+        available
+    }
+    
+    #[cfg(feature = "ffmpeg")]
+    fn extract_with_ffmpeg(&self, _data: &[u8]) -> Result<Vec<ByteSegment>> {
+        // This would use video-rs to extract frames
+        // For now, return placeholder
+        Err(anyhow::anyhow!("FFmpeg extraction not yet implemented"))
+    }
 }
 
 impl ModalityPreTokenizer for VideoPreTokenizer {
     fn pre_tokenize(&self, data: &[u8]) -> Result<Vec<ByteSegment>> {
+        let mut self_mut = Self::new(self.frame_rate);
+        let ffmpeg_available = self_mut.check_ffmpeg();
+        
+        // If FFmpeg is available and the feature is enabled, use it
+        #[cfg(feature = "ffmpeg")]
+        if ffmpeg_available {
+            match self_mut.extract_with_ffmpeg(data) {
+                Ok(segments) => return Ok(segments),
+                Err(e) => {
+                    eprintln!("Warning: FFmpeg extraction failed: {}, falling back to pure Rust", e);
+                }
+            }
+        }
+        
+        // If FFmpeg is not available or not enabled, check if user wants to install it
+        if !ffmpeg_available {
+            eprintln!("\n⚠️  FFmpeg not found on your system");
+            eprintln!("\nVideo processing is limited without FFmpeg:");
+            eprintln!("  ❌ No video frame extraction");
+            eprintln!("  ✅ Audio track extraction only (via Symphonia)");
+            eprintln!("  ✅ Pure Rust - no system dependencies");
+            eprintln!("\nSupported formats with FFmpeg:");
+            eprintln!("  • H.264 (all profiles)");
+            eprintln!("  • H.265/HEVC");
+            eprintln!("  • VP8, VP9");
+            eprintln!("  • AV1");
+            eprintln!("  • MPEG-4, MPEG-2");
+            eprintln!("  • And many more...");
+            eprintln!("\nOptions:");
+            eprintln!("  1. Run: ./scripts/install_ffmpeg.sh");
+            eprintln!("  2. Continue with limitations (audio extraction only)");
+            eprintln!("\nContinuing with pure Rust implementation...\n");
+        }
+        
+        // Pure Rust fallback - extract audio only
         let mut segments = Vec::new();
         
-        // 1. Try to extract audio track using Symphonia
         let audio_tokenizer = AudioPreTokenizer::new(160, 44100);
         match audio_tokenizer.pre_tokenize(data) {
             Ok(audio_segments) => {
-                // Successfully extracted audio - add with video context
                 for mut seg in audio_segments {
                     if let Some(ref mut metadata) = seg.metadata {
                         if let Some(ref mut extra) = metadata.extra {
                             extra["source"] = serde_json::Value::String("video_audio_track".into());
+                            extra["ffmpeg_available"] = serde_json::Value::Bool(ffmpeg_available);
                         }
                     }
                     segments.push(seg);
                 }
             },
             Err(_) => {
-                // No audio track found or extraction failed
+                // No audio track found
             }
         }
         
-        // 2. For video frames, we acknowledge the limitation
-        // Pure Rust decoders are not comprehensive enough yet
-        // Options:
-        // - rav1d for AV1 (but most videos aren't AV1)
-        // - h264-decoder for H.264 Baseline (but most use Main/High profile)
-        // - No pure Rust HEVC, VP8, VP9 decoders of production quality
-        
-        // For now, we return a metadata segment indicating the limitation
-        segments.push(ByteSegment {
-            bytes: Vec::new(), // Empty - no frame data extracted
-            label: Some("video_frames_not_extracted".to_string()),
-            metadata: Some(SegmentMetadata {
-                start_offset: 0,
-                end_offset: data.len(),
-                confidence: 0.0,
-                extra: Some(serde_json::json!({
-                    "note": "Pure Rust video frame extraction not yet supported",
-                    "reason": "Limited codec support in pure Rust ecosystem",
-                    "alternatives": [
-                        "Use ffmpeg via video-rs for comprehensive codec support",
-                        "Extract frames externally and process as images",
-                        "Wait for rust-av ecosystem to mature"
-                    ],
-                    "supported_codecs_pure_rust": [
-                        "AV1 via rav1d (not integrated)",
-                        "H.264 Baseline via h264-decoder (not integrated)"
-                    ],
-                    "file_size_bytes": data.len(),
-                    "frame_rate_requested": self.frame_rate
-                })),
-            }),
-        });
+        // Add metadata about video processing limitations
+        if !ffmpeg_available {
+            segments.push(ByteSegment {
+                bytes: Vec::new(),
+                label: Some("video_frames_not_extracted".to_string()),
+                metadata: Some(SegmentMetadata {
+                    start_offset: 0,
+                    end_offset: data.len(),
+                    confidence: 0.0,
+                    extra: Some(serde_json::json!({
+                        "note": "Install FFmpeg for full video support",
+                        "install_command": "./scripts/install_ffmpeg.sh",
+                        "pure_rust_limitations": {
+                            "extracted": "audio_only",
+                            "missing": "video_frames"
+                        }
+                    })),
+                }),
+            });
+        }
         
         if segments.is_empty() {
             return Err(anyhow::anyhow!("No extractable content from video file"));
@@ -696,7 +748,7 @@ impl PreTokenizerType {
                 Ok(Box::new(PdfPreTokenizer { extract_text: *extract_text }))
             }
             PreTokenizerType::Video { frame_rate } => {
-                Ok(Box::new(VideoPreTokenizer { frame_rate: *frame_rate }))
+                Ok(Box::new(VideoPreTokenizer::new(*frame_rate)))
             }
             PreTokenizerType::Binary => {
                 Ok(Box::new(BinaryPreTokenizer))

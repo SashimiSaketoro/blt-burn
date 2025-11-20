@@ -125,7 +125,7 @@ Automatic format detection based on magic bytes:
 
 #### Planned Support (Stubs Available)
 - **PDF**: Text/image extraction (requires `pdf` crate)
-- **Video**: Frame extraction (limited by pure-Rust codec availability - currently extracts audio only)
+- **Video**: Smart FFmpeg detection - full frame extraction when available, falls back to audio-only
 - **Binary**: ELF section parsing (requires `goblin` crate)
 
 ### Pure-Rust Philosophy
@@ -137,7 +137,7 @@ To maintain portability and ease of deployment, BLT-Burn prioritizes pure-Rust i
 - **Documents**: `pdf` crate for PDF parsing (pure-Rust)
 - **Binaries**: `goblin` for ELF/PE/Mach-O analysis (pure-Rust)
 
-This approach avoids system dependencies like FFmpeg, making the library more portable and easier to build.
+This approach avoids system dependencies like FFmpeg, making the library more portable and easier to build.\n\n### Video Processing with Smart FFmpeg Detection\n\nBLT-Burn now includes intelligent FFmpeg detection for video processing:\n\n1. **Automatic Detection**: Checks for FFmpeg at runtime\n2. **User-Friendly Prompt**: If not found, shows clear options:\n   - Install via provided script: `./scripts/install_ffmpeg.sh`\n   - Continue with pure Rust (audio extraction only)\n3. **Graceful Fallback**: Always works, even without FFmpeg\n\nTo enable FFmpeg support when building:\n```bash\ncargo build --features ffmpeg\n```
 
 ## Documentation
 

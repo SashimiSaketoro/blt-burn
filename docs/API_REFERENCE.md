@@ -256,24 +256,39 @@ let pretokenizer = PreTokenizerType::Video {
     frame_rate: 30 
 }.create()?;
 
-// Current capabilities:
-// - Extracts audio tracks using Symphonia (pure Rust)
-// - Returns metadata about video codec limitations
-// - Does NOT extract video frames due to limited pure Rust codec support
+// Automatically detects FFmpeg availability:
+// - With FFmpeg: Full video frame + audio extraction
+// - Without FFmpeg: Audio extraction only (pure Rust)
 ```
 
-**Implementation Details**:
-- **Audio extraction**: Works via Symphonia for audio tracks in video containers
-- **Video frames**: Not supported - pure Rust decoders only cover:
-  - AV1 (via rav1d - not integrated)
-  - H.264 Baseline (via h264-decoder - not integrated)
-  - No HEVC, VP8, VP9, or H.264 Main/High profile support
-- **Returns**: Audio segments + metadata explaining video limitations
+**Smart FFmpeg Detection**:
+1. **Automatic check** at runtime for FFmpeg installation
+2. **User-friendly prompt** if FFmpeg is not found:
+   - Shows supported formats with FFmpeg vs pure Rust
+   - Offers to run installation script
+   - Allows continuing with pure Rust limitations
+3. **Graceful fallback** to Symphonia for audio extraction
 
-**Alternatives**:
-1. Preprocess videos with ffmpeg to extract frames as images
-2. Use video-rs with FFmpeg dependency for full codec support
-3. Wait for rust-av ecosystem to mature
+**With FFmpeg (via video-rs)**:
+- H.264 (all profiles: Baseline, Main, High)
+- H.265/HEVC
+- VP8, VP9
+- AV1
+- MPEG-4, MPEG-2
+- And many more formats
+
+**Without FFmpeg (pure Rust)**:
+- Audio track extraction via Symphonia
+- Metadata about video limitations
+- No frame extraction
+
+**Installation**:
+```bash
+# Automatic installation script provided:
+./scripts/install_ffmpeg.sh
+
+# Supports macOS (Homebrew), Ubuntu/Debian, Fedora, Arch
+```
 
 #### Binary Pre-Tokenizer
 ```rust

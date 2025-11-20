@@ -32,6 +32,12 @@ tree-sitter-python = "0.25"
 symphonia = "0.5"
 pdf = "0.9"
 goblin = "0.8"
+# Video decoding with FFmpeg (optional)
+video-rs = { version = "0.10", optional = true }
+
+[features]
+default = []
+ffmpeg = ["video-rs"]
 
 [build-dependencies]
 anyhow = "1.0"
