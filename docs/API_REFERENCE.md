@@ -674,8 +674,8 @@ fn process_image(image_path: &str) -> anyhow::Result<()> {
 |-----------|-------|-------------|
 | `target_shells` | 64-512 | 128-256 for most cases |
 | `capacity_exponent` | 1.0-2.0 | 1.5 (empirically optimal) |
-| `min_radius` | 32-128 | 64.0 |
-| `max_radius` | 512-2048 | 1024.0 |
+| `min_radius` | 10.0-64.0 | 32.0 (Hollow Core size) |
+| `max_radius` | Unbounded | Determined by prominence |
 
 ---
 

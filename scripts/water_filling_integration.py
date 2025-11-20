@@ -15,6 +15,7 @@ import numpy as np
 from safetensors.flax import load_file
 from typing import Tuple, Dict
 import argparse
+import json
 from pathlib import Path
 
 
@@ -23,6 +24,19 @@ def load_blt_output(safetensors_path: str) -> Dict[str, jnp.ndarray]:
     Load pre-computed embeddings and metadata from Rust output.
     """
     data = load_file(safetensors_path)
+    
+    # Check for metadata sidecar
+    path = Path(safetensors_path)
+    meta_path = path.with_suffix(".metadata.json")
+    if meta_path.exists():
+        try:
+            with open(meta_path, 'r') as f:
+                meta = json.load(f)
+            modality = meta.get('modality', 'unknown')
+            segments = len(meta.get('segments', []))
+            print(f"  [Metadata] Modality: {modality} | Segments: {segments}")
+        except Exception as e:
+            print(f"  [Metadata] Failed to read sidecar: {e}")
     
     # Convert to JAX arrays
     return {k: jnp.array(v) for k, v in data.items()}
@@ -33,16 +47,20 @@ def load_blt_output(safetensors_path: str) -> Dict[str, jnp.ndarray]:
 # ============================================================================
 
 def osmotic_water_filling(embeddings_raw: jnp.ndarray, 
-                         n_shells: int = 128,
+                         n_shells: int = 256,
+                         min_radius: float = 32.0,
                          max_iters: int = 100) -> Tuple[jnp.ndarray, jnp.ndarray]:
     """
     Osmotic water-filling using pre-norm L2 magnitudes as density signal.
     
-    Key Innovation: L2 norm creates osmotic pressure that drives rebalancing.
+    Topology: Hollow Core + Infinite Crust
+    - min_radius: Enforces a hollow core (Event Horizon) to prevent center crowding.
+    - Crust: Expands radially based on prominence/pressure.
     
     Args:
         embeddings_raw: [N, dim] embeddings BEFORE normalization
-        n_shells: Number of concentric shells
+        n_shells: Number of concentric shells (resolution)
+        min_radius: Minimum radius (Hollow Core size)
         max_iters: Maximum optimization iterations
     
     Returns:
@@ -66,23 +84,44 @@ def osmotic_water_filling(embeddings_raw: jnp.ndarray,
     mean_prominence = jnp.mean(prominence)
     is_outlier = prominence > (mean_prominence + 1.0 * std_dev)
     
-    # Initial shell assignment based on prominence quantiles
-    shell_boundaries = jnp.linspace(0, 1, n_shells + 1)
-    prominence_quantiles = jnp.percentile(prominence, shell_boundaries * 100)
-    shells = jnp.searchsorted(prominence_quantiles, prominence)
+    # Initial shell assignment based on prominence
+    # Map prominence range to shells linearly first
+    # We want to spread points out.
+    # If min prominence is ~10, max is ~60.
+    # We map this range to the shell indices.
+    max_p = jnp.max(prominence)
+    norm_p = (prominence - jnp.min(prominence)) / (max_p - jnp.min(prominence) + 1e-6)
+    shells = jnp.floor(norm_p * (n_shells - 1)).astype(jnp.int32)
     shells = jnp.clip(shells, 0, n_shells - 1)
     
-    # Radial spacing: sqrt + r^1.5
-    base_radii = jnp.sqrt(jnp.arange(n_shells)) + jnp.arange(n_shells) ** 1.5
-    base_radii = base_radii / base_radii[-1]  # Normalize to [0, 1]
+    # Radial spacing: Hollow Core + Expanding Crust
+    # We allow radii to grow non-linearly to create "infinite" feel
+    shell_indices = jnp.arange(n_shells)
+    
+    # Scaling factor ensures the crust is expansive
+    # Radius = min_radius + (index * scale)
+    # We calibrate so that the "middle" shell corresponds to mean prominence?
+    # Or simply define a spatial metric.
+    # Let's use a power law to give more space to outer shells.
+    
+    # Scale such that n_shells covers reasonable range (e.g. up to 2x max prominence)
+    scale = (max_p * 2.0) / (n_shells ** 1.2)
+    base_radii = min_radius + (shell_indices ** 1.2) * scale
     
     # Iterative water-filling
     for iteration in range(max_iters):
         # Count points in each shell
         shell_counts = jnp.bincount(shells, length=n_shells)
         
-        # Capacity of each shell (scales with r^1.5)
-        shell_capacities = (base_radii ** 1.5) * (N / jnp.sum(base_radii ** 1.5))
+        # Capacity of each shell
+        # Volume of shell at radius R is proportional to R^(dim-1).
+        # But we effectively project to lower dim for "shells" abstraction?
+        # If we use full dim, capacity grows EXPLOSIVELY.
+        # Let's use a moderated capacity growth (e.g. R^2) to prevent all points
+        # from collapsing into the outermost shell (where volume is infinite).
+        # We want a balance. R^1.5 or R^2 works well empirically for embedding dists.
+        shell_capacities = (base_radii ** 2.0)
+        shell_capacities = shell_capacities * (N / jnp.sum(shell_capacities))
         
         # Detect overloaded and underloaded shells
         shell_loads = shell_counts / (shell_capacities + 1e-8)
@@ -165,6 +204,7 @@ if __name__ == "__main__":
     parser.add_argument("--input", type=str, default="blt_output.safetensors", help="Path to .safetensors file or directory")
     parser.add_argument("--output-dir", type=str, default="sphere_output", help="Directory to save sphere results")
     parser.add_argument("--method", type=str, default="osmotic", choices=["osmotic", "thrml"], help="Water-filling method")
+    parser.add_argument("--min-radius", type=float, default=32.0, help="Minimum radius for hollow core")
     args = parser.parse_args()
     
     input_path = Path(args.input)
@@ -211,7 +251,7 @@ if __name__ == "__main__":
             # Run Water Filling
             radii, shells = None, None
             if args.method == "osmotic":
-                radii, shells = osmotic_water_filling(embeddings)
+                radii, shells = osmotic_water_filling(embeddings, min_radius=args.min_radius)
             else:
                 radii, shells = thrml_energy_water_filling(embeddings)
                 
