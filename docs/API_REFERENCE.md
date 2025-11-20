@@ -490,29 +490,64 @@ fn process_large_file(path: &str) -> Result<()> {
 
 ### Output Format
 
-The `ingest` binary produces `.safetensors` files with:
+The `ingest` binary produces matched pairs of files for every input item:
 
-```python
-{
-    "embeddings": [batch, seq_len, 768],      # Pre-norm!
-    "prominence": [batch, seq_len],           # L2 norms
-    "patch_indices": [num_patches],           # Start positions
-    "patch_mask": [batch, seq_len],           # Binary mask
-}
-```
+1. **Tensor Data (`.safetensors`)**:
+   - Header: Contains `metadata_file` key pointing to the JSON sidecar.
+   - Tensors:
+     ```python
+     {
+         "embeddings": [batch, seq_len, 768],      # Pre-norm!
+         "prominence": [batch, seq_len],           # L2 norms
+         "patch_indices": [num_patches],           # Start positions
+         "patch_mask": [batch, seq_len],           # Binary mask
+     }
+     ```
+
+2. **Metadata Sidecar (`.metadata.json`)**:
+   - Contains rich semantic information lost in tensor conversion.
+   - Format:
+     ```json
+     {
+       "source_hash": "sha256...",
+       "modality": "video",
+       "total_bytes": 102400,
+       "segments": [
+         {
+           "label": "video_frame",
+           "metadata": {
+             "start_offset": 0,
+             "end_offset": 0,
+             "confidence": 1.0,
+             "extra": { "timestamp": 0.033, "width": 1920, "height": 1080 }
+           }
+         }
+       ]
+     }
+     ```
 
 ### Python Integration
 
 ```python
 import numpy as np
+import json
+from pathlib import Path
 from safetensors.numpy import load_file
 
-# Load BLT output
-data = load_file("ingest_output/item_0.safetensors")
+# 1. Load Tensor Data
+tensor_path = Path("ingest_output/item_0.safetensors")
+data = load_file(tensor_path)
 embeddings = data["embeddings"]    # Pre-norm embeddings
 prominence = data["prominence"]    # For water-filling
 
-# Apply water-filling (osmotic or THRML)
+# 2. Load Semantic Metadata (Sidecar)
+meta_filename = tensor_path.with_suffix(".metadata.json")
+with open(meta_filename, 'r') as f:
+    metadata = json.load(f)
+
+print(f"Processing {metadata['modality']} content")
+
+# 3. Apply water-filling (osmotic or THRML)
 from water_filling_integration import osmotic_water_filling
 sphere_coords, radii, shells = osmotic_water_filling(
     embeddings=embeddings,
