@@ -104,7 +104,7 @@ cargo run --bin ingest
 - ✅ **bf16 Precision** - 50% smaller model size with maintained accuracy
 - ✅ **FineWeb-Edu Integration** - Built-in dataset utilities
 - ✅ **Water-Filling Ready** - Output format optimized for hypersphere pipelines
-- ✅ **Metadata Sidecar** - Preserves rich semantic information (labels, offsets) alongside tensors
+- ✅ **Hypergraph Sidecar** - Preserves rich semantic information with explicit Trunk-Branch-Leaf topology alongside tensors
 
 ### Multimodal Pre-Tokenization
 

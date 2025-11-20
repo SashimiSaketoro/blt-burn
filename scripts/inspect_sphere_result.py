@@ -29,31 +29,59 @@ def inspect_safetensors(path):
         print(f"Error loading safetensors: {e}")
         return
 
-    # Look for metadata sidecar
+    # Look for hypergraph sidecar
     # Try direct name match or check header (if accessible, but name match is robust here)
-    meta_path = path.with_suffix(".metadata.json")
+    meta_path = path.with_suffix(".hypergraph.json")
     if not meta_path.exists():
-        # Check if filename matches pattern item_ID_part_X.safetensors -> item_ID.metadata.json
+        # Check if filename matches pattern item_ID_part_X.safetensors -> item_ID.hypergraph.json
         # This is a heuristic.
         name = path.stem
         if "_part_" in name:
             base_name = name.split("_part_")[0]
-            meta_path = path.parent / f"{base_name}.metadata.json"
+            meta_path = path.parent / f"{base_name}.hypergraph.json"
             
     if meta_path.exists():
         try:
             with open(meta_path, 'r') as f:
                 meta = json.load(f)
-            print("\n✅ Found Metadata Sidecar:")
+            print("\n✅ Found Hypergraph Sidecar:")
             print(f"  File: {meta_path.name}")
-            print(f"  Source Hash: {meta.get('source_hash', 'N/A')}")
-            print(f"  Modality: {meta.get('modality', 'N/A')}")
-            print(f"  Total Bytes: {meta.get('total_bytes', 'N/A')}")
             
-            segments = meta.get('segments', [])
-            print(f"  Segments: {len(segments)}")
+            nodes = meta.get('nodes', [])
+            edges = meta.get('edges', [])
+            topology = meta.get('topology', {}).get('edges', [])
             
-            # Map patches to segments if patch_indices exist
+            print(f"  Nodes: {len(nodes)}")
+            print(f"  Hyperedges: {len(edges)}")
+            print(f"  Topology Entries: {len(topology)}")
+            
+            # Find Trunk
+            trunk_node = None
+            for i, node in enumerate(nodes):
+                if "Trunk" in node:
+                    trunk_node = node["Trunk"]
+                    print(f"  Trunk: Source Hash={trunk_node.get('source_hash', 'N/A')}")
+                    break
+                    
+            # Find Branches
+            branches = []
+            for i, node in enumerate(nodes):
+                if "Branch" in node:
+                    branches.append(node["Branch"])
+            
+            print(f"  Branches: {len(branches)}")
+            for b in branches:
+                print(f"    - {b.get('label')} ({b.get('modality')})")
+                
+            # Map patches to Leaf segments
+            # We need to filter nodes to find only Leaves
+            leaves = []
+            for i, node in enumerate(nodes):
+                if "Leaf" in node:
+                    leaves.append(node["Leaf"])
+            
+            print(f"  Leaves (Segments): {len(leaves)}")
+            
             if "patch_indices" in data:
                 patch_indices = data["patch_indices"]
                 print(f"\nMapping first 10 patches (of {len(patch_indices)}) to semantic segments:")
@@ -64,7 +92,7 @@ def inspect_safetensors(path):
                     
                     # Find segment containing this byte index
                     match = None
-                    for seg in segments:
+                    for seg in leaves:
                         m = seg.get('metadata', {})
                         start = m.get('start_offset')
                         end = m.get('end_offset')
@@ -81,16 +109,36 @@ def inspect_safetensors(path):
                         print(f"  Patch {i} (Byte {idx}) -> {label} {extra if extra else ''}")
                         count += 1
                     else:
-                        # If no match, it might be between segments or generated
                         pass
                         
                 if count == 0:
                     print("  (No patches mapped to segments - indices might be out of bounds or segments are generated/frames)")
+            
+            # Print Topology Sample
+            print("\nHypergraph Topology (Sample):")
+            for i, (edge_weight_idx, vertex_indices) in enumerate(topology[:5]):
+                edge_data = edges[edge_weight_idx] if edge_weight_idx < len(edges) else {}
+                label = edge_data.get('label', 'unknown')
+                
+                # Map vertex indices to types
+                v_types = []
+                for v_idx in vertex_indices:
+                    if v_idx < len(nodes):
+                        n = nodes[v_idx]
+                        if "Trunk" in n: v_types.append("Trunk")
+                        elif "Branch" in n: v_types.append("Branch")
+                        elif "Leaf" in n: v_types.append("Leaf")
+                        else: v_types.append("Unknown")
+                    else:
+                        v_types.append("Invalid")
+                        
+                print(f"  Edge {i}: [{label}] connects {v_types}")
+
 
         except Exception as e:
-            print(f"Error reading metadata sidecar: {e}")
+            print(f"Error reading hypergraph sidecar: {e}")
     else:
-        print("\n⚠️ No metadata sidecar found.")
+        print("\n⚠️ No hypergraph sidecar found.")
 
 if __name__ == "__main__":
     if len(sys.argv) > 1:

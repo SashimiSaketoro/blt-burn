@@ -4,6 +4,7 @@ use blt_burn::{
     patcher::{patch_start_mask_from_entropy_with_monotonicity, patch_start_indices_cpu},
     dataset::FineWebEduDataset,
     pretokenize::{detect_modality, ByteSegment, SegmentMetadata},
+    sidecar::{HypergraphSidecar, HypergraphBuilder, NodeData, EdgeData},
 };
 use burn::{
     backend::wgpu::{Wgpu, WgpuDevice},
@@ -19,16 +20,9 @@ use std::fs::{self, File};
 use std::io::Write;
 use sha2::{Sha256, Digest};
 use serde::{Serialize, Deserialize};
+use hypergraph::VertexIndex;
 
 const MAX_TOKENS_PER_FILE: usize = 100_000; // Split large files into parts to prevent RAM explosion
-
-#[derive(Debug, Serialize, Deserialize)]
-struct MetadataSidecar {
-    source_hash: String,
-    total_bytes: usize,
-    modality: String,
-    segments: Vec<ByteSegment>,
-}
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -81,7 +75,7 @@ fn process_data(
     model: &LMTransformer<Wgpu>,
     device: &WgpuDevice,
     threshold: f64,
-) -> Result<(Vec<f32>, Vec<f32>, Vec<i32>, Vec<i32>, usize, MetadataSidecar), anyhow::Error> {
+) -> Result<(Vec<f32>, Vec<f32>, Vec<i32>, Vec<i32>, usize, HypergraphSidecar), anyhow::Error> {
     // 1. Compute Hash
     let source_hash = compute_hash(data);
 
@@ -99,14 +93,61 @@ fn process_data(
         
     let total_tokens = tokens_vec.len();
     
+    // --- Hypergraph Builder Initialization ---
+    let mut builder = HypergraphBuilder::new();
+    
     if total_tokens == 0 {
-        return Ok((vec![], vec![], vec![], vec![], 0, MetadataSidecar {
-            source_hash,
+        // Even if empty, return a valid graph with just the Trunk
+         let _trunk = builder.add_node(NodeData::Trunk { 
+            source_hash: source_hash.clone(),
             total_bytes: 0,
-            modality: modality_name,
-            segments: vec![],
-        }));
+        });
+        return Ok((vec![], vec![], vec![], vec![], 0, builder.build()));
     }
+    
+    // A. Add Trunk (File Root)
+    let trunk_idx = builder.add_node(NodeData::Trunk { 
+        source_hash: source_hash.clone(),
+        total_bytes: data.len(),
+    });
+    
+    // B. Add Branch (Modality)
+    let branch_idx = builder.add_node(NodeData::Branch { 
+        label: modality_name.clone(),
+        modality: modality_name.clone(),
+    });
+    
+    // C. Connect Trunk -> Branch (Containment)
+    builder.add_hyperedge(vec![trunk_idx, branch_idx], EdgeData { 
+        label: "contains".to_string(), 
+        weight: 1.0 
+    });
+    
+    // D. Process Segments (Leaves)
+    let mut prev_leaf_idx: Option<VertexIndex> = None;
+    
+    for segment in segments {
+        // Add Leaf Node
+        let leaf_idx = builder.add_node(NodeData::Leaf(segment.clone()));
+        
+        // Connect Branch -> Leaf (Containment)
+        builder.add_hyperedge(vec![branch_idx, leaf_idx], EdgeData { 
+            label: "contains".to_string(), 
+            weight: 1.0 
+        });
+        
+        // Connect Sequence (Prev Leaf -> This Leaf)
+        if let Some(prev) = prev_leaf_idx {
+            builder.add_hyperedge(vec![prev, leaf_idx], EdgeData { 
+                label: "next".to_string(), 
+                weight: 1.0 
+            });
+        }
+        
+        prev_leaf_idx = Some(leaf_idx);
+    }
+    
+    // --- End Hypergraph Builder ---
 
     let chunk_size = 1024;
     let stride = 512; // Process 512 new tokens per chunk, keeping 512 as context
@@ -179,18 +220,11 @@ fn process_data(
     
     let patch_indices_i32: Vec<i32> = patch_indices_inner.iter().map(|&x| x as i32).collect();
     
-    let sidecar = MetadataSidecar {
-        source_hash,
-        total_bytes: data.len(),
-        modality: modality_name,
-        segments,
-    };
-    
-    Ok((embeddings_f32, norms_f32, patch_indices_i32, patch_mask_vec, total_tokens, sidecar))
+    Ok((embeddings_f32, norms_f32, patch_indices_i32, patch_mask_vec, total_tokens, builder.build()))
 }
 
 
-fn save_metadata_sidecar(path: &Path, sidecar: &MetadataSidecar) {
+fn save_metadata_sidecar(path: &Path, sidecar: &HypergraphSidecar) {
     let file = File::create(path).expect("Failed to create metadata sidecar file");
     serde_json::to_writer_pretty(file, sidecar).expect("Failed to write metadata sidecar");
 }
@@ -283,7 +317,7 @@ fn main() {
         println!("Processing single input ({} bytes)...", bytes.len());
         match process_data(&bytes, &model, &device, args.threshold) {
             Ok((emb, norms, idxs, mask, count, sidecar)) => {
-                let metadata_filename = format!("{}.metadata.json", filename_prefix);
+                let metadata_filename = format!("{}.hypergraph.json", filename_prefix);
                 let metadata_path = args.output_dir.join(&metadata_filename);
                 save_metadata_sidecar(&metadata_path, &sidecar);
 
@@ -315,7 +349,7 @@ fn main() {
                 Ok((emb, norms, idxs, mask, count, sidecar)) => {
                     if count > 0 {
                         // Save metadata sidecar (one per item)
-                        let metadata_filename = format!("item_{}.metadata.json", id_str);
+                        let metadata_filename = format!("item_{}.hypergraph.json", id_str);
                         let metadata_path = args.output_dir.join(&metadata_filename);
                         save_metadata_sidecar(&metadata_path, &sidecar);
 

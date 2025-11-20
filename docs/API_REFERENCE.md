@@ -32,8 +32,8 @@
 └──────────────┘     └──────────────┘     └──────────────┘     └──────────────┘
                             │                     │                     │
                             ▼                     ▼                     ▼
-                     ByteSegments          Pre-norm Embeddings   Hypersphere Coords
-                     + Metadata            + Prominence Scores   + Shell Assignments
+                     HypergraphSidecar     Pre-norm Embeddings   Hypersphere Coords
+                     (Trunk/Branch/Leaf)   + Prominence Scores   + Shell Assignments
 ```
 
 ### Key Design Principles
@@ -41,7 +41,8 @@
 1. **Modality Agnostic**: Accepts any byte stream (text, images, audio, code, etc.)
 2. **Pre-L2-Norm Signal Extraction**: Captures embedding norms *before* L2 normalization for prominence
 3. **Entropy-Based Boundaries**: Uses model confidence (entropy) to determine natural segmentation
-4. **Sphere-Ready Output**: Produces embeddings and prominence scores ready for hypersphere organization
+4. **Hypergraph Topology**: Explicitly models the hierarchical relationship between File (Trunk), Modality (Branch), and Patch (Leaf).
+5. **Sphere-Ready Output**: Produces embeddings and prominence scores ready for hypersphere organization
 
 ---
 
@@ -57,6 +58,7 @@ blt-burn/
 │   ├── pretokenize.rs     # Multimodal pre-tokenization framework
 │   ├── patcher.rs         # Entropy calculation & patch extraction
 │   ├── dataset.rs         # FineWeb-Edu and dataset utilities
+│   ├── sidecar.rs         # Hypergraph DTO and builder
 │   └── lib.rs             # Public API exports
 ├── docs/
 │   ├── API_REFERENCE.md   # This file
@@ -504,25 +506,28 @@ The `ingest` binary produces matched pairs of files for every input item:
      }
      ```
 
-2. **Metadata Sidecar (`.metadata.json`)**:
-   - Contains rich semantic information lost in tensor conversion.
+2. **Hypergraph Sidecar (`.hypergraph.json`)**:
+   - Replaces the old linear `.metadata.json`.
+   - Contains rich semantic information structured as a Directed Hypergraph.
+   - Implements **Skeleton (Topology) + Flesh (Data)** architecture.
    - Format:
      ```json
      {
-       "source_hash": "sha256...",
-       "modality": "video",
-       "total_bytes": 102400,
-       "segments": [
-         {
-           "label": "video_frame",
-           "metadata": {
-             "start_offset": 0,
-             "end_offset": 0,
-             "confidence": 1.0,
-             "extra": { "timestamp": 0.033, "width": 1920, "height": 1080 }
-           }
-         }
-       ]
+       "nodes": [
+         { "Trunk": { "source_hash": "...", "total_bytes": 1024 } },
+         { "Branch": { "label": "video_stream", "modality": "video" } },
+         { "Leaf": { "bytes": [], "label": "frame_0", "metadata": { ... } } }
+       ],
+       "edges": [
+         { "label": "contains", "weight": 1.0 },
+         { "label": "next", "weight": 1.0 }
+       ],
+       "topology": {
+         "edges": [
+           [0, [0, 1]], // Edge 0 connects Node 0 (Trunk) -> Node 1 (Branch)
+           [0, [1, 2]]  // Edge 0 (contains) connects Node 1 -> Node 2 (Leaf)
+         ]
+       }
      }
      ```
 
@@ -540,12 +545,15 @@ data = load_file(tensor_path)
 embeddings = data["embeddings"]    # Pre-norm embeddings
 prominence = data["prominence"]    # For water-filling
 
-# 2. Load Semantic Metadata (Sidecar)
-meta_filename = tensor_path.with_suffix(".metadata.json")
+# 2. Load Hypergraph Sidecar
+meta_filename = tensor_path.with_suffix(".hypergraph.json")
 with open(meta_filename, 'r') as f:
-    metadata = json.load(f)
+    hypergraph = json.load(f)
 
-print(f"Processing {metadata['modality']} content")
+nodes = hypergraph['nodes']
+# Find Trunk/Branch info
+trunk = next(n['Trunk'] for n in nodes if 'Trunk' in n)
+print(f"Processing {trunk['source_hash']} content")
 
 # 3. Apply water-filling (osmotic or THRML)
 from water_filling_integration import osmotic_water_filling

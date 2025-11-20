@@ -25,18 +25,46 @@ def load_blt_output(safetensors_path: str) -> Dict[str, jnp.ndarray]:
     """
     data = load_file(safetensors_path)
     
-    # Check for metadata sidecar
+    # Check for metadata/hypergraph sidecar
     path = Path(safetensors_path)
-    meta_path = path.with_suffix(".metadata.json")
+    
+    # Try hypergraph first (new format)
+    meta_path = path.with_suffix(".hypergraph.json")
+    format_type = "hypergraph"
+    
+    if not meta_path.exists():
+        # Fallback to old metadata format
+        meta_path = path.with_suffix(".metadata.json")
+        format_type = "legacy"
+        
     if meta_path.exists():
         try:
             with open(meta_path, 'r') as f:
                 meta = json.load(f)
-            modality = meta.get('modality', 'unknown')
-            segments = len(meta.get('segments', []))
-            print(f"  [Metadata] Modality: {modality} | Segments: {segments}")
+            
+            if format_type == "hypergraph":
+                # Parse hypergraph nodes to find Branch info
+                nodes = meta.get('nodes', [])
+                modality = "unknown"
+                segments_count = 0
+                
+                # Find Branch for modality
+                for node in nodes:
+                    if "Branch" in node:
+                        modality = node["Branch"].get('modality', 'unknown')
+                    if "Leaf" in node:
+                        segments_count += 1
+                        
+                print(f"  [Sidecar] Format: Hypergraph | Modality: {modality} | Leaves: {segments_count}")
+                
+            else:
+                # Legacy flat format
+                modality = meta.get('modality', 'unknown')
+                segments = len(meta.get('segments', []))
+                print(f"  [Sidecar] Format: Legacy | Modality: {modality} | Segments: {segments}")
+                
         except Exception as e:
-            print(f"  [Metadata] Failed to read sidecar: {e}")
+            print(f"  [Sidecar] Failed to read sidecar: {e}")
     
     # Convert to JAX arrays
     return {k: jnp.array(v) for k, v in data.items()}

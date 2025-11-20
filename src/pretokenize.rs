@@ -562,17 +562,20 @@ impl VideoPreTokenizer {
         temp.write_all(data)?;
         let path = temp.into_temp_path();
         
-        video_rs::init()?;
-        let source = video_rs::Locator::Path(path.to_path_buf());
-        let mut decoder = video_rs::Decoder::new(&source)?;
+        video_rs::init().map_err(|e| anyhow::anyhow!("Video init failed: {}", e))?;
+        let source = video_rs::Location::File(path.to_path_buf());
+        let mut decoder = video_rs::Decoder::new(&source).map_err(|e| anyhow::anyhow!("Decoder creation failed: {}", e))?;
         
         let mut segments = Vec::new();
         let mut frame_count = 0;
         
-        // Note: decode_iter yields (Time, Frame)
-        for frame_result in decoder.decode_iter() {
-            if let Ok((timestamp, frame)) = frame_result {
-                let (width, height) = frame.resolution();
+        // Use decode_raw_iter per compiler suggestion
+        for frame_result in decoder.decode_raw_iter() {
+            if let Ok(frame) = frame_result {
+                let (width, height) = (frame.width(), frame.height());
+                // frame.timestamp() usually returns Option<i64> (PTS)
+                // We'll use frame index if timestamp is tricky without timebase
+                let ts: f64 = frame.timestamp().unwrap_or(0) as f64;
                 
                 // TODO: Convert frame data to RGB bytes efficiently
                 // For now, we create a segment with empty bytes but rich metadata
@@ -587,7 +590,7 @@ impl VideoPreTokenizer {
                         end_offset: 0,
                         confidence: 1.0,
                         extra: Some(serde_json::json!({
-                            "timestamp": timestamp.as_secs_f64(),
+                            "timestamp": ts,
                             "width": width,
                             "height": height,
                             "frame_idx": frame_count,
