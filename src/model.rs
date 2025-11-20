@@ -3,12 +3,10 @@ use burn::{
     module::{Module, Param},
     nn::{
         self,
-        attention::{MhaInput, MultiHeadAttention, MultiHeadAttentionConfig},
-        Initializer, Linear, LinearConfig,
+        Linear, LinearConfig,
     },
-    tensor::{activation::{softmax, log_softmax, silu}, backend::Backend, Tensor},
+    tensor::{activation::{softmax, silu}, backend::Backend, Tensor},
 };
-use serde::{Deserialize, Serialize};
 
 #[derive(Config, Debug)]
 pub struct LMTransformerConfig {

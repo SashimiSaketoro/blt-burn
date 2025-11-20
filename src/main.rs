@@ -170,7 +170,7 @@ fn main() {
     // Move to CPU/Data for serialization
     let embeddings_data = embeddings.into_data();
     let norms_data = norms.into_data();
-    let patch_indices_flat: Vec<i32> = patch_indices[0].iter().map(|&x| x as i32).collect();
+    let _patch_indices_flat: Vec<i32> = patch_indices[0].iter().map(|&x| x as i32).collect();
     
     // Convert to flattened f32 vectors for safetensors
     let embeddings_f32: Vec<f32> = embeddings_data.iter::<f32>().collect();

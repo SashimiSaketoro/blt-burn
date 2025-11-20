@@ -110,8 +110,8 @@ impl BltTokenizer {
 
 pub struct TikTokenTokenizer {
     bpe: CoreBPE,
-    bos_id: usize,
-    eos_id: usize,
+    _bos_id: usize,
+    _eos_id: usize,
 }
 
 impl TikTokenTokenizer {
@@ -122,7 +122,7 @@ impl TikTokenTokenizer {
         let bos_id = bpe.encode_with_special_tokens("<|begin_of_text|>").first().cloned().unwrap_or(0); 
         let eos_id = bpe.encode_with_special_tokens("<|end_of_text|>").first().cloned().unwrap_or(1);
         
-        Ok(Self { bpe, bos_id, eos_id })
+        Ok(Self { bpe, _bos_id: bos_id, _eos_id: eos_id })
     }
 }
 
@@ -138,8 +138,8 @@ impl Tokenizer for TikTokenTokenizer {
 
 pub struct SentencePieceTokenizer {
     model: sentencepiece::SentencePieceProcessor,
-    bos_id: usize,
-    eos_id: usize,
+    _bos_id: usize,
+    _eos_id: usize,
 }
 
 impl SentencePieceTokenizer {
@@ -148,7 +148,7 @@ impl SentencePieceTokenizer {
         let bos_id = model.bos_id().unwrap_or(1) as usize;
         let eos_id = model.eos_id().unwrap_or(2) as usize;
         
-        Ok(Self { model, bos_id, eos_id })
+        Ok(Self { model, _bos_id: bos_id, _eos_id: eos_id })
     }
     
     pub fn vocab_size(&self) -> usize {

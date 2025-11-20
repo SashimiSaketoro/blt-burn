@@ -1,4 +1,4 @@
-use blt_burn::pretokenize::{PreTokenizerType, ModalityPreTokenizer};
+use blt_burn::pretokenize::PreTokenizerType;
 use anyhow::Result;
 
 fn main() -> Result<()> {
