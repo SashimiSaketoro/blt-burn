@@ -35,7 +35,7 @@ If you need the full BLT functionality, please refer to the [original repository
 
 ## Known Limitations
 
-- **Dataset Python Environment**: The burn-dataset loader creates its own Python 3.9 virtual environment, which may conflict with projects requiring Python 3.12+ syntax. Workaround: Use `--text` or `--file` flags for direct text input, or ensure your system has Python 3.9 available.
+- **Video Processing**: Requires FFmpeg to be installed (handled automatically by build script).
 
 ## Quick Start
 
