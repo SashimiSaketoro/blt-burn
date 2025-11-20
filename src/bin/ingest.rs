@@ -17,6 +17,8 @@ use safetensors::serialize;
 use std::fs::{self, File};
 use std::io::Write;
 
+const MAX_TOKENS_PER_FILE: usize = 100_000; // Split large files into parts to prevent RAM explosion
+
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
@@ -73,12 +75,24 @@ fn process_text(
     }
 
     let chunk_size = 1024;
+    let stride = 512; // Process 512 new tokens per chunk, keeping 512 as context
+    let context_size = chunk_size - stride; // 512 tokens of context
+    
     let mut chunk_entropies_list = Vec::new();
     let mut chunk_norms_list = Vec::new();
     let mut chunk_embeddings_list = Vec::new();
     
-    for chunk in tokens_vec.chunks(chunk_size) {
+    let mut position = 0;
+    while position < tokens_vec.len() {
+        // Determine chunk boundaries
+        let start = if position == 0 { 0 } else { position - context_size };
+        let end = (position + stride).min(tokens_vec.len());
+        let chunk = &tokens_vec[start..end];
         let chunk_len = chunk.len();
+        
+        // Skip index to ignore low-context outputs at the beginning of non-first chunks
+        let skip_count = if position == 0 { 0 } else { context_size };
+        
         let input = Tensor::<Wgpu, 1, burn::tensor::Int>::from_ints(
             chunk,
             device,
@@ -87,9 +101,24 @@ fn process_text(
         let output = model.forward_with_embeddings(input);
         let chunk_entropies = blt_burn::patcher::entropy(output.logits);
         
-        chunk_entropies_list.push(chunk_entropies);
-        chunk_norms_list.push(output.embedding_norms);
-        chunk_embeddings_list.push(output.pre_norm_embeddings);
+        // Extract only the valid portion (skip context that was already processed)
+        if skip_count > 0 {
+            let valid_entropies = chunk_entropies.clone().slice([0..1, skip_count..chunk_len]);
+            let valid_norms = output.embedding_norms.clone().slice([0..1, skip_count..chunk_len]);
+            let valid_embeddings = output.pre_norm_embeddings.clone().slice([0..1, skip_count..chunk_len, 0..768]);
+            
+            chunk_entropies_list.push(valid_entropies);
+            chunk_norms_list.push(valid_norms);
+            chunk_embeddings_list.push(valid_embeddings);
+        } else {
+            // First chunk - use everything
+            chunk_entropies_list.push(chunk_entropies);
+            chunk_norms_list.push(output.embedding_norms);
+            chunk_embeddings_list.push(output.pre_norm_embeddings);
+        }
+        
+        // Move position forward by stride amount
+        position = end;
     }
     
     let entropies = Tensor::cat(chunk_entropies_list, 1).reshape([1, total_tokens]);
@@ -119,6 +148,7 @@ fn process_text(
     (embeddings_f32, norms_f32, patch_indices_i32, patch_mask_vec, total_tokens)
 }
 
+
 fn save_safetensors(
     path: &Path, 
     embeddings_f32: &[f32], 
@@ -127,6 +157,12 @@ fn save_safetensors(
     patch_mask_vec: &[i32], 
     total_tokens: usize
 ) {
+    // Safety rail: Don't create empty files
+    if total_tokens == 0 {
+        println!("Warning: Skipping save_safetensors - no tokens to save");
+        return;
+    }
+    
     let tensors: Vec<(&str, TensorView)> = vec![
         ("embeddings", TensorView::new(
             Dtype::F32,
@@ -215,9 +251,39 @@ fn main() {
             let (emb, norms, idxs, mask, count) = process_text(&item.text, &model, &tokenizer, &device, args.threshold);
             
             if count > 0 {
-                let filename = format!("item_{}.safetensors", id_str);
-                let path = args.output_dir.join(filename);
-                save_safetensors(&path, &emb, &norms, &idxs, &mask, count);
+                // Split into parts if too large to prevent RAM issues
+                let parts = (count + MAX_TOKENS_PER_FILE - 1) / MAX_TOKENS_PER_FILE;
+                
+                if parts == 1 {
+                    // Single file
+                    let filename = format!("item_{}.safetensors", id_str);
+                    let path = args.output_dir.join(filename);
+                    save_safetensors(&path, &emb, &norms, &idxs, &mask, count);
+                } else {
+                    // Split into multiple parts
+                    for part in 0..parts {
+                        let start = part * MAX_TOKENS_PER_FILE;
+                        let end = ((part + 1) * MAX_TOKENS_PER_FILE).min(count);
+                        let part_tokens = end - start;
+                        
+                        // Extract ranges for this part
+                        let emb_start = start * 768;
+                        let emb_end = end * 768;
+                        
+                        let filename = format!("item_{}_part_{}.safetensors", id_str, part);
+                        let path = args.output_dir.join(filename);
+                        
+                        // Create slices for this part
+                        save_safetensors(
+                            &path, 
+                            &emb[emb_start..emb_end], 
+                            &norms[start..end], 
+                            &idxs,  // Keep all patch indices for context
+                            &mask[start..end], 
+                            part_tokens
+                        );
+                    }
+                }
             }
         }
     }

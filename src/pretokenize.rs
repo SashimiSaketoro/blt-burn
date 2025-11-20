@@ -116,21 +116,38 @@ impl ImagePreTokenizer {
 
 impl ModalityPreTokenizer for ImagePreTokenizer {
     fn pre_tokenize(&self, data: &[u8]) -> Result<Vec<ByteSegment>> {
-        // Simple patch-based segmentation
-        // In production, this would decode the image format first
+        // WARNING: This is processing raw compressed bytes for JPEG/PNG
+        // The entropy model will see these as high-entropy noise
+        // In production, you should:
+        // 1. Detect format (JPEG/PNG/etc)
+        // 2. Decode to raw pixels
+        // 3. Then create patches from pixel data
+        
+        // For now, we tag compressed data appropriately
+        let is_likely_compressed = data.len() > 4 && (
+            (data[0] == 0xFF && data[1] == 0xD8) || // JPEG
+            (data[0] == 0x89 && data[1] == 0x50)    // PNG
+        );
+        
         let mut segments = Vec::new();
         let mut offset = 0;
         
         while offset + self.patch_size <= data.len() {
             segments.push(ByteSegment {
                 bytes: data[offset..offset + self.patch_size].to_vec(),
-                label: Some("image_patch".to_string()),
+                label: Some(if is_likely_compressed { "compressed_image_patch" } else { "image_patch" }.to_string()),
                 metadata: Some(SegmentMetadata {
                     start_offset: offset,
                     end_offset: offset + self.patch_size,
-                    confidence: 1.0,
+                    confidence: if is_likely_compressed { 0.1 } else { 1.0 }, // Low confidence for compressed
                     extra: Some(serde_json::json!({
                         "patch_index": segments.len(),
+                        "is_compressed": is_likely_compressed,
+                        "warning": if is_likely_compressed { 
+                            serde_json::Value::String("High entropy expected - compressed image format".to_string())
+                        } else { 
+                            serde_json::Value::Null
+                        }
                     })),
                 }),
             });

@@ -113,9 +113,9 @@ impl<B: Backend> LMTransformer<B> {
         
         // Compute L2 norms for each position (useful for water-filling)
         // Shape: [batch, seq, dim] -> [batch, seq]
-        let embedding_norms = pre_norm_embeddings
-            .clone()
-            .powf_scalar(2.0)  // Square each element
+        // Optimization: Use element-wise multiplication instead of powf_scalar(2.0)
+        let squared = pre_norm_embeddings.clone() * pre_norm_embeddings.clone();
+        let embedding_norms = squared
             .sum_dim(2)        // Sum over dim dimension
             .sqrt()           // Take square root
             .reshape([batch_size, seq_len]);      // [batch, seq, 1] -> [batch, seq]
@@ -387,9 +387,9 @@ pub struct RmsNorm<B: Backend> {
 
 impl<B: Backend> RmsNorm<B> {
     pub fn forward(&self, x: Tensor<B, 3>) -> Tensor<B, 3> {
-        let norm = x
-            .clone()
-            .powf_scalar(2.0)
+        // Optimization: Use element-wise multiplication instead of powf_scalar(2.0)
+        let squared = x.clone() * x.clone();
+        let norm = squared
             .mean_dim(2)
             .sqrt()
             .add_scalar(self.epsilon);

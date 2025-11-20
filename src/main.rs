@@ -93,8 +93,11 @@ fn main() {
     
     println!("Model initialized and weights loaded.");
 
-    // Run Model in Chunks
-    let chunk_size = 1024; // Smaller chunk size to manage memory with embeddings
+    // Run Model in Chunks with Overlapping Windows
+    let chunk_size = 1024; // Full context window size
+    let stride = 512; // Process 512 new tokens per chunk, keeping 512 as context
+    let context_size = chunk_size - stride; // 512 tokens of context
+    
     let mut chunk_entropies_list = Vec::new();
     let mut chunk_norms_list = Vec::new();
     let mut chunk_embeddings_list = Vec::new();
@@ -102,14 +105,25 @@ fn main() {
     let tokens_vec: Vec<i32> = tokens.iter().map(|&t| t as i32).collect();
     let total_tokens = tokens_vec.len();
     
-    println!("Processing {} tokens in chunks of {}...", total_tokens, chunk_size);
+    println!("Processing {} tokens with overlapping windows (chunk_size={}, stride={})...", total_tokens, chunk_size, stride);
     
-    for (i, chunk) in tokens_vec.chunks(chunk_size).enumerate() {
-        if i % 5 == 0 {
-            println!("Processing chunk {}/{}", i + 1, (total_tokens + chunk_size - 1) / chunk_size);
+    let mut position = 0;
+    let mut chunk_idx = 0;
+    while position < tokens_vec.len() {
+        if chunk_idx % 5 == 0 {
+            let progress = (position as f32 / total_tokens as f32 * 100.0) as u32;
+            println!("Processing position {}/{} ({}%)", position, total_tokens, progress);
         }
         
+        // Determine chunk boundaries with context overlap
+        let start = if position == 0 { 0 } else { position - context_size };
+        let end = (position + stride).min(tokens_vec.len());
+        let chunk = &tokens_vec[start..end];
         let chunk_len = chunk.len();
+        
+        // Skip index to ignore low-context outputs at the beginning of non-first chunks
+        let skip_count = if position == 0 { 0 } else { context_size };
+        
         let input = Tensor::<Backend, 1, burn::tensor::Int>::from_ints(
             chunk,
             &device,
@@ -120,10 +134,25 @@ fn main() {
         
         let chunk_entropies = blt_burn::patcher::entropy(output.logits);
         
-        // Store tensors
-        chunk_entropies_list.push(chunk_entropies);
-        chunk_norms_list.push(output.embedding_norms);
-        chunk_embeddings_list.push(output.pre_norm_embeddings);
+        // Extract only the valid portion (skip context that was already processed)
+        if skip_count > 0 {
+            let valid_entropies = chunk_entropies.clone().slice([0..1, skip_count..chunk_len]);
+            let valid_norms = output.embedding_norms.clone().slice([0..1, skip_count..chunk_len]);
+            let valid_embeddings = output.pre_norm_embeddings.clone().slice([0..1, skip_count..chunk_len, 0..768]);
+            
+            chunk_entropies_list.push(valid_entropies);
+            chunk_norms_list.push(valid_norms);
+            chunk_embeddings_list.push(valid_embeddings);
+        } else {
+            // First chunk - use everything
+            chunk_entropies_list.push(chunk_entropies);
+            chunk_norms_list.push(output.embedding_norms);
+            chunk_embeddings_list.push(output.pre_norm_embeddings);
+        }
+        
+        // Move position forward by stride amount
+        position = end;
+        chunk_idx += 1;
     }
     
     println!("Aggregating results...");

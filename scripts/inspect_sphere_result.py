@@ -1,14 +1,20 @@
 import numpy as np
 import sys
 from pathlib import Path
+from safetensors import safe_open
 
-def inspect_npz(path):
+def inspect_safetensors(path):
     print(f"Inspecting {path}...")
     try:
-        data = np.load(path)
-        print("Keys:", list(data.keys()))
+        with safe_open(path, framework="numpy") as f:
+            keys = f.keys()
+            print("Keys:", list(keys))
+            
+            data = {}
+            for key in keys:
+                data[key] = f.get_tensor(key)
         
-        for key in data.keys():
+        for key in keys:
             arr = data[key]
             print(f"\n{key}: shape={arr.shape}, dtype={arr.dtype}")
             if arr.size > 0:
@@ -24,12 +30,12 @@ def inspect_npz(path):
 
 if __name__ == "__main__":
     if len(sys.argv) > 1:
-        inspect_npz(sys.argv[1])
+        inspect_safetensors(sys.argv[1])
     else:
-        # Find first npz in sphere_results
-        results_dir = Path("blt-burn/sphere_results")
-        files = list(results_dir.glob("*.npz"))
+        # Find first safetensors in test_output
+        results_dir = Path("test_output")
+        files = list(results_dir.glob("*.safetensors"))
         if files:
-            inspect_npz(files[0])
+            inspect_safetensors(files[0])
         else:
-            print("No .npz files found.")
+            print("No .safetensors files found.")
