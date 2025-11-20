@@ -33,3 +33,40 @@ impl FineWebEduDataset {
         self.dataset.len()
     }
 }
+
+/* 
+/// Example: Handling MINT-1T with Burn Dataset Transforms
+/// MINT-1T is massive and interleaved. Use composable transforms to handle it efficiently.
+/// 
+/// Requires: burn = { features = ["dataset"] }
+/// 
+/// use burn::data::dataset::transform::{ComposedDataset, PartialDataset, SamplerDataset, WindowsDataset, ShuffledDataset};
+/// 
+/// struct MintItem { text: Option<String>, image_bytes: Option<Vec<u8>>, url: String }
+/// struct Mint1TDataset { ... } // Implements Dataset<MintItem>
+/// 
+/// fn create_pipeline() {
+///     let mint = Mint1TDataset::new("mint-1t-parquet-shard");
+///     
+///     // 1. Shard: Process a subset to avoid OOM or distributed processing
+///     let partial = PartialDataset::new(mint, 0..1_000_000); 
+///     
+///     // 2. Sample: Balance modalities (e.g. oversample images if rare)
+///     let sampled = SamplerDataset::new(partial, 10_000, true); // 10k items with replacement
+///     
+///     // 3. Shuffle: Randomize order
+///     let shuffled = ShuffledDataset::new(sampled, 42);
+///     
+///     // 4. Window: Sliding window over bytes (if flattening to pure byte stream)
+///     // Note: This usually requires mapping to a flat byte representation first
+///     // let windowed = WindowsDataset::new(shuffled, 1024, 512); 
+///     
+///     for item in shuffled.iter() {
+///         // Use pre-tokenizer on specific fields
+///         if let Some(img) = item.image_bytes {
+///             let pt = detect_modality(&img);
+///             let segments = pt.create()?.pre_tokenize(&img)?;
+///         }
+///     }
+/// }
+*/

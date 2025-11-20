@@ -59,8 +59,11 @@ pub fn detect_modality(data: &[u8]) -> PreTokenizerType {
     } else if data.starts_with(b"RIFF") && data.len() > 12 && &data[8..12] == b"WAVE" { // WAV
         return PreTokenizerType::Audio { frame_size: 160, sample_rate: 16000 };
     } else if data.starts_with(b"ID3") || (data.starts_with(b"\xFF\xFB") || data.starts_with(b"\xFF\xF3") || data.starts_with(b"\xFF\xF2")) { // MP3 (ID3 or sync)
-        // MP3 decoding needs more deps, defaulting to Audio with standard assumption or failing later
         return PreTokenizerType::Audio { frame_size: 160, sample_rate: 44100 };
+    } else if data.starts_with(&[0x7F, b'E', b'L', b'F']) { // ELF Binary
+        return PreTokenizerType::Binary;
+    } else if data.starts_with(b"PK\x03\x04") { // ZIP / Jar / Docx
+         return PreTokenizerType::Binary; 
     }
 
     // Heuristics for code
@@ -492,6 +495,20 @@ impl ModalityPreTokenizer for VideoPreTokenizer {
     }
 }
 
+/// Binary/ELF Pre-Tokenizer (Placeholder)
+pub struct BinaryPreTokenizer;
+
+impl ModalityPreTokenizer for BinaryPreTokenizer {
+    fn pre_tokenize(&self, _data: &[u8]) -> Result<Vec<ByteSegment>> {
+        // Requires 'goblin' crate.
+        Err(anyhow::anyhow!("Binary support requires 'goblin' crate"))
+    }
+    
+    fn modality(&self) -> &str {
+        "binary"
+    }
+}
+
 /// Pre-tokenizer factory for creating the appropriate pre-tokenizer
 pub enum PreTokenizerType {
     TextSimple,
@@ -502,6 +519,7 @@ pub enum PreTokenizerType {
     Code { language: String },
     Pdf { extract_text: bool },
     Video { frame_rate: u32 },
+    Binary,
 }
 
 impl PreTokenizerType {
@@ -530,6 +548,9 @@ impl PreTokenizerType {
             }
             PreTokenizerType::Video { frame_rate } => {
                 Ok(Box::new(VideoPreTokenizer { frame_rate: *frame_rate }))
+            }
+            PreTokenizerType::Binary => {
+                Ok(Box::new(BinaryPreTokenizer))
             }
         }
     }
