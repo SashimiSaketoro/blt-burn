@@ -1,5 +1,8 @@
 use anyhow::Result;
 use tokenizers::Tokenizer as HFTokenizer;
+use image::{GenericImageView, Pixel};
+use std::io::Cursor;
+use tree_sitter::{Parser, Language};
 
 /// Trait for pre-tokenizing different data modalities into byte segments
 /// that can be processed by the BLT entropy model.
@@ -37,6 +40,21 @@ pub struct SegmentMetadata {
     
     /// Additional modality-specific metadata
     pub extra: Option<serde_json::Value>,
+}
+
+/// Auto-detect content type and return appropriate PreTokenizerType
+pub fn detect_modality(data: &[u8]) -> PreTokenizerType {
+    if data.len() > 4 {
+        // Magic bytes check
+        if data.starts_with(b"\xFF\xD8") || data.starts_with(b"\x89PNG") {
+            return PreTokenizerType::Image { patch_size: 16, stride: 16 }; // 16x16 standard patches
+        } else if data.starts_with(b"RIFF") && &data[8..12] == b"WAVE" {
+            return PreTokenizerType::Audio { frame_size: 160, sample_rate: 16000 };
+        }
+    }
+    
+    // Heuristic for code vs text could go here, but default to RawText for now
+    PreTokenizerType::TextRaw
 }
 
 /// Text pre-tokenizer using Hugging Face tokenizers
@@ -102,7 +120,50 @@ impl ModalityPreTokenizer for TextPreTokenizer {
     }
 }
 
-/// Image pre-tokenizer using patch-based segmentation
+/// Raw UTF-8 pre-tokenizer (True BLT style)
+pub struct RawTextPreTokenizer;
+
+impl ModalityPreTokenizer for RawTextPreTokenizer {
+    fn pre_tokenize(&self, data: &[u8]) -> Result<Vec<ByteSegment>> {
+        // Return char-level segments for granular processing
+        let text = String::from_utf8_lossy(data);
+        let mut segments = Vec::new();
+        let mut byte_offset = 0;
+
+        for char in text.chars() {
+            let char_len = char.len_utf8();
+            // Ensure we don't go out of bounds if String::from_utf8_lossy replaced chars
+            if byte_offset + char_len > data.len() {
+                break;
+            }
+            
+            let char_bytes = data[byte_offset..byte_offset + char_len].to_vec();
+            
+            segments.push(ByteSegment {
+                bytes: char_bytes,
+                label: Some("char".to_string()),
+                metadata: Some(SegmentMetadata {
+                    start_offset: byte_offset,
+                    end_offset: byte_offset + char_len,
+                    confidence: 1.0,
+                    extra: Some(serde_json::json!({
+                        "char": char.to_string()
+                    })),
+                }),
+            });
+            byte_offset += char_len;
+        }
+        
+        Ok(segments)
+    }
+
+    fn modality(&self) -> &str {
+        "text_raw"
+    }
+}
+
+/// Image pre-tokenizer using patch-based segmentation on RAW PIXELS
+/// Enhanced with simple entropy-based tagging capability
 pub struct ImagePreTokenizer {
     patch_size: usize,
     stride: usize,
@@ -112,46 +173,78 @@ impl ImagePreTokenizer {
     pub fn new(patch_size: usize, stride: usize) -> Self {
         Self { patch_size, stride }
     }
+    
+    fn compute_patch_entropy(bytes: &[u8]) -> f32 {
+        let mut counts = [0usize; 256];
+        for &b in bytes {
+            counts[b as usize] += 1;
+        }
+        let total = bytes.len() as f32;
+        if total == 0.0 { return 0.0; }
+        
+        let mut entropy = 0.0;
+        for &count in &counts {
+            if count > 0 {
+                let p = count as f32 / total;
+                entropy -= p * p.log2();
+            }
+        }
+        entropy
+    }
 }
 
 impl ModalityPreTokenizer for ImagePreTokenizer {
     fn pre_tokenize(&self, data: &[u8]) -> Result<Vec<ByteSegment>> {
-        // WARNING: This is processing raw compressed bytes for JPEG/PNG
-        // The entropy model will see these as high-entropy noise
-        // In production, you should:
-        // 1. Detect format (JPEG/PNG/etc)
-        // 2. Decode to raw pixels
-        // 3. Then create patches from pixel data
+        // Decode image from bytes (supports PNG, JPEG, etc.)
+        let img = image::load_from_memory(data)
+            .map_err(|e| anyhow::anyhow!("Failed to decode image: {}", e))?;
         
-        // For now, we tag compressed data appropriately
-        let is_likely_compressed = data.len() > 4 && (
-            (data[0] == 0xFF && data[1] == 0xD8) || // JPEG
-            (data[0] == 0x89 && data[1] == 0x50)    // PNG
-        );
+        // Convert to RGB8
+        let rgb = img.to_rgb8();
+        let (width, height) = rgb.dimensions();
         
         let mut segments = Vec::new();
-        let mut offset = 0;
         
-        while offset + self.patch_size <= data.len() {
-            segments.push(ByteSegment {
-                bytes: data[offset..offset + self.patch_size].to_vec(),
-                label: Some(if is_likely_compressed { "compressed_image_patch" } else { "image_patch" }.to_string()),
-                metadata: Some(SegmentMetadata {
-                    start_offset: offset,
-                    end_offset: offset + self.patch_size,
-                    confidence: if is_likely_compressed { 0.1 } else { 1.0 }, // Low confidence for compressed
-                    extra: Some(serde_json::json!({
-                        "patch_index": segments.len(),
-                        "is_compressed": is_likely_compressed,
-                        "warning": if is_likely_compressed { 
-                            serde_json::Value::String("High entropy expected - compressed image format".to_string())
-                        } else { 
-                            serde_json::Value::Null
-                        }
-                    })),
-                }),
-            });
-            offset += self.stride;
+        // Iterate over patches
+        for y in (0..height).step_by(self.stride) {
+            for x in (0..width).step_by(self.stride) {
+                // Extract patch
+                let mut patch_bytes = Vec::with_capacity(self.patch_size * self.patch_size * 3);
+                
+                // Handle boundary conditions
+                for py in 0..self.patch_size as u32 {
+                    for px in 0..self.patch_size as u32 {
+                        let pixel = if x + px < width && y + py < height {
+                            *rgb.get_pixel(x + px, y + py)
+                        } else {
+                            image::Rgb([0, 0, 0]) // Zero padding
+                        };
+                        patch_bytes.extend_from_slice(&pixel.0);
+                    }
+                }
+                
+                let entropy = Self::compute_patch_entropy(&patch_bytes);
+                
+                // Tag low entropy patches
+                let label = if entropy < 2.0 { "image_patch_low_entropy" } else { "image_patch" };
+
+                segments.push(ByteSegment {
+                    bytes: patch_bytes,
+                    label: Some(label.to_string()),
+                    metadata: Some(SegmentMetadata {
+                        start_offset: (y * width + x) as usize * 3, // Approximate offset
+                        end_offset: ((y + self.patch_size as u32) * width + x + self.patch_size as u32) as usize * 3,
+                        confidence: 1.0,
+                        extra: Some(serde_json::json!({
+                            "x": x,
+                            "y": y,
+                            "width": width,
+                            "height": height,
+                            "local_entropy": entropy
+                        })),
+                    }),
+                });
+            }
         }
         
         Ok(segments)
@@ -162,7 +255,7 @@ impl ModalityPreTokenizer for ImagePreTokenizer {
     }
 }
 
-/// Audio pre-tokenizer using frame-based segmentation
+/// Audio pre-tokenizer using frame-based segmentation on RAW PCM
 pub struct AudioPreTokenizer {
     frame_size: usize,
     sample_rate: u32,
@@ -176,25 +269,43 @@ impl AudioPreTokenizer {
 
 impl ModalityPreTokenizer for AudioPreTokenizer {
     fn pre_tokenize(&self, data: &[u8]) -> Result<Vec<ByteSegment>> {
-        // Frame-based segmentation
+        // Try to decode as WAV first
+        let cursor = Cursor::new(data);
+        let mut reader = hound::WavReader::new(cursor)
+            .map_err(|e| anyhow::anyhow!("Failed to read WAV header: {}", e))?;
+            
+        let spec = reader.spec();
+        
+        let samples: Vec<i16> = reader.samples::<i16>()
+            .filter_map(|s| s.ok())
+            .collect();
+            
+        // Convert back to bytes (little endian)
+        let raw_bytes: Vec<u8> = samples.iter()
+            .flat_map(|&s| s.to_le_bytes().to_vec())
+            .collect();
+            
+        // Now chunk into frames
+        let bytes_per_frame = self.frame_size * 2; // 2 bytes per sample
         let mut segments = Vec::new();
         let mut offset = 0;
         
-        while offset + self.frame_size <= data.len() {
+        while offset + bytes_per_frame <= raw_bytes.len() {
             segments.push(ByteSegment {
-                bytes: data[offset..offset + self.frame_size].to_vec(),
+                bytes: raw_bytes[offset..offset + bytes_per_frame].to_vec(),
                 label: Some("audio_frame".to_string()),
                 metadata: Some(SegmentMetadata {
                     start_offset: offset,
-                    end_offset: offset + self.frame_size,
+                    end_offset: offset + bytes_per_frame,
                     confidence: 1.0,
                     extra: Some(serde_json::json!({
                         "frame_index": segments.len(),
-                        "sample_rate": self.sample_rate,
+                        "sample_rate": spec.sample_rate,
+                        "channels": spec.channels
                     })),
                 }),
             });
-            offset += self.frame_size;
+            offset += bytes_per_frame;
         }
         
         Ok(segments)
@@ -205,7 +316,7 @@ impl ModalityPreTokenizer for AudioPreTokenizer {
     }
 }
 
-/// Code pre-tokenizer (placeholder - would use tree-sitter for AST-aware segmentation)
+/// Code pre-tokenizer using Tree-Sitter for AST-aware segmentation
 pub struct CodePreTokenizer {
     language: String,
 }
@@ -218,39 +329,76 @@ impl CodePreTokenizer {
 
 impl ModalityPreTokenizer for CodePreTokenizer {
     fn pre_tokenize(&self, data: &[u8]) -> Result<Vec<ByteSegment>> {
-        // TODO: Integrate tree-sitter for AST-aware segmentation
-        // For now, use simple line-based segmentation
-        let text = String::from_utf8_lossy(data);
-        let segments = text.lines()
-            .enumerate()
-            .map(|(i, line)| {
-                ByteSegment {
-                    bytes: line.as_bytes().to_vec(),
-                    label: Some(format!("code_line_{}", self.language)),
+        let mut parser = Parser::new();
+        
+        let lang = match self.language.as_str() {
+            "rust" => tree_sitter_rust::language(),
+            "python" => tree_sitter_python::language(),
+            // Fallback or error for unsupported langs
+            _ => return Err(anyhow::anyhow!("Unsupported language for AST parsing")),
+        };
+        
+        parser.set_language(lang)?;
+        
+        // Tree-sitter expects string-like input usually, but works on bytes
+        let tree = parser.parse(data, None)
+            .ok_or_else(|| anyhow::anyhow!("Failed to parse code"))?;
+            
+        let root = tree.root_node();
+        let mut segments = Vec::new();
+        let mut cursor = root.walk();
+        
+        // Traverse the tree. 
+        // Strategy: Iterate over top-level children (functions, structs, imports)
+        // and treat them as segments.
+        for child in root.children(&mut cursor) {
+            let start = child.start_byte();
+            let end = child.end_byte();
+            
+            // Only process valid byte ranges
+            if end <= data.len() {
+                segments.push(ByteSegment {
+                    bytes: data[start..end].to_vec(),
+                    label: Some(child.kind().to_string()),
                     metadata: Some(SegmentMetadata {
-                        start_offset: 0, // TODO: track actual offsets
-                        end_offset: line.len(),
-                        confidence: 0.8,
+                        start_offset: start,
+                        end_offset: end,
+                        confidence: 1.0,
                         extra: Some(serde_json::json!({
-                            "line_number": i + 1,
-                            "language": &self.language,
+                            "node_type": child.kind(),
+                            "is_named": child.is_named()
                         })),
                     }),
-                }
-            })
-            .collect();
+                });
+            }
+        }
+        
+        // If no top-level structure found (e.g. snippet), fallback to whole block or lines
+        if segments.is_empty() {
+             segments.push(ByteSegment {
+                bytes: data.to_vec(),
+                label: Some("code_snippet".to_string()),
+                metadata: Some(SegmentMetadata {
+                    start_offset: 0,
+                    end_offset: data.len(),
+                    confidence: 0.5,
+                    extra: None,
+                }),
+            });
+        }
         
         Ok(segments)
     }
     
     fn modality(&self) -> &str {
-        "code"
+        "code_ast"
     }
 }
 
 /// Pre-tokenizer factory for creating the appropriate pre-tokenizer
 pub enum PreTokenizerType {
     TextSimple,
+    TextRaw, // NEW: True BLT style
     TextFromFile { path: String },
     Image { patch_size: usize, stride: usize },
     Audio { frame_size: usize, sample_rate: u32 },
@@ -262,6 +410,9 @@ impl PreTokenizerType {
         match self {
             PreTokenizerType::TextSimple => {
                 Ok(Box::new(TextPreTokenizer::new_simple()?))
+            }
+            PreTokenizerType::TextRaw => {
+                Ok(Box::new(RawTextPreTokenizer))
             }
             PreTokenizerType::TextFromFile { path } => {
                 Ok(Box::new(TextPreTokenizer::from_file(path)?))
