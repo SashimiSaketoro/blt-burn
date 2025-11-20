@@ -1,5 +1,5 @@
 use blt_burn::{
-    model::{LMTransformerConfig, LMTransformer},
+    model::LMTransformerConfig,
     tokenizer::BltTokenizer,
     patcher::{patch_start_mask_from_entropy_with_monotonicity, patch_start_indices_cpu},
 };
@@ -28,8 +28,8 @@ struct Args {
     file: Option<PathBuf>,
 
     /// Path to model weights (Burn binary format)
-    #[arg(short, long, default_value = "blt_entropy_model.bin")]
-    model_path: PathBuf,
+    #[arg(short, long)]
+    model_path: Option<PathBuf>,
     
     /// Entropy threshold
     #[arg(short = 'r', long, default_value_t = 1.35)]
@@ -43,6 +43,11 @@ struct Args {
 fn main() {
     let args = Args::parse();
     
+    // Determine model path: argument > build-time env var > default local
+    let model_path = args.model_path.or_else(|| {
+        option_env!("BLT_MODEL_CACHE_PATH").map(PathBuf::from)
+    }).unwrap_or_else(|| PathBuf::from("blt_entropy_model.mpk"));
+
     let text = if let Some(t) = args.text {
         t
     } else if let Some(f) = args.file {
@@ -79,10 +84,10 @@ fn main() {
     let model = config.init::<Backend>(&device);
     
     // Load weights from .mpk file
-    println!("Loading weights from {:?}", args.model_path);
+    println!("Loading weights from {:?}", model_path);
     let recorder = NamedMpkFileRecorder::<FullPrecisionSettings>::default();
     let model = model.load_record(
-        recorder.load(args.model_path.into(), &device)
+        recorder.load(model_path.clone().into(), &device)
             .expect("Failed to load weights")
     );
     
@@ -165,25 +170,25 @@ fn main() {
         ("embeddings", TensorView::new(
             Dtype::F32,
             vec![1, total_tokens, 768],
-            unsafe { std::slice::from_raw_parts(embeddings_f32.as_ptr() as *const u8, embeddings_f32.len() * 4) }
+            bytemuck::cast_slice(&embeddings_f32)
         ).unwrap()),
         
         ("prominence", TensorView::new(
             Dtype::F32,
             vec![1, total_tokens],
-            unsafe { std::slice::from_raw_parts(norms_f32.as_ptr() as *const u8, norms_f32.len() * 4) }
+            bytemuck::cast_slice(&norms_f32)
         ).unwrap()),
         
         ("patch_indices", TensorView::new(
             Dtype::I32,
             vec![patch_indices_i32.len()],
-            unsafe { std::slice::from_raw_parts(patch_indices_i32.as_ptr() as *const u8, patch_indices_i32.len() * 4) }
+            bytemuck::cast_slice(&patch_indices_i32)
         ).unwrap()),
         
         ("patch_mask", TensorView::new(
             Dtype::I32,
             vec![1, total_tokens],
-            unsafe { std::slice::from_raw_parts(patch_mask_vec.as_ptr() as *const u8, patch_mask_vec.len() * 4) }
+            bytemuck::cast_slice(&patch_mask_vec)
         ).unwrap()),
     ];
 

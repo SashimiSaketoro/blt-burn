@@ -6,7 +6,7 @@ use blt_burn::{
 };
 use burn::{
     backend::wgpu::{Wgpu, WgpuDevice},
-    tensor::{Tensor, ElementConversion},
+    tensor::Tensor,
     record::{HalfPrecisionSettings, NamedMpkFileRecorder, Recorder},
     module::Module,
 };
@@ -16,7 +16,6 @@ use safetensors::tensor::{Dtype, TensorView};
 use safetensors::serialize;
 use std::fs::{self, File};
 use std::io::Write;
-use hf_hub::{api::sync::Api, Repo, RepoType};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -28,10 +27,6 @@ struct Args {
     /// Path to input file (optional override)
     #[arg(short, long)]
     file: Option<PathBuf>,
-    
-    /// Use FineWeb-Edu dataset
-    #[arg(long, default_value_t = false)]
-    dataset: bool,
     
     /// Dataset subset
     #[arg(long, default_value = "sample-10BT")]
@@ -46,8 +41,8 @@ struct Args {
     limit: Option<usize>,
 
     /// Path to model weights (Burn binary format)
-    #[arg(short, long, default_value = "blt_entropy_model.mpk")]
-    model_path: PathBuf,
+    #[arg(short, long)]
+    model_path: Option<PathBuf>,
     
     /// Entropy threshold
     #[arg(short = 'r', long, default_value_t = 1.35)]
@@ -136,22 +131,22 @@ fn save_safetensors(
         ("embeddings", TensorView::new(
             Dtype::F32,
             vec![1, total_tokens, 768],
-            unsafe { std::slice::from_raw_parts(embeddings_f32.as_ptr() as *const u8, embeddings_f32.len() * 4) }
+            bytemuck::cast_slice(embeddings_f32)
         ).unwrap()),
         ("prominence", TensorView::new(
             Dtype::F32,
             vec![1, total_tokens],
-            unsafe { std::slice::from_raw_parts(norms_f32.as_ptr() as *const u8, norms_f32.len() * 4) }
+            bytemuck::cast_slice(norms_f32)
         ).unwrap()),
         ("patch_indices", TensorView::new(
             Dtype::I32,
             vec![patch_indices_i32.len()],
-            unsafe { std::slice::from_raw_parts(patch_indices_i32.as_ptr() as *const u8, patch_indices_i32.len() * 4) }
+            bytemuck::cast_slice(patch_indices_i32)
         ).unwrap()),
         ("patch_mask", TensorView::new(
             Dtype::I32,
             vec![1, total_tokens],
-            unsafe { std::slice::from_raw_parts(patch_mask_vec.as_ptr() as *const u8, patch_mask_vec.len() * 4) }
+            bytemuck::cast_slice(patch_mask_vec)
         ).unwrap()),
     ];
 
@@ -176,24 +171,18 @@ fn main() {
     let model = config.init::<Backend>(&device);
     let recorder = NamedMpkFileRecorder::<HalfPrecisionSettings>::default();
 
-    // Check if model exists, if not download from HF
-    let model_path = if args.model_path.exists() {
-        println!("Found local model at {:?}", args.model_path);
-        args.model_path
-    } else {
-        println!("Model not found at {:?}, downloading from Hugging Face...", args.model_path);
-        let api = Api::new().expect("Failed to create HF API");
-        let repo = api.repo(Repo::new("SashimiSaketoro/entropy_burn".to_string(), RepoType::Model));
-        let path = repo.get("blt_entropy_model.mpk").expect("Failed to download model");
-        println!("Downloaded model to {:?}", path);
-        path
-    };
+    // Determine model path: argument > build-time env var > default local
+    let model_path = args.model_path.or_else(|| {
+        option_env!("BLT_MODEL_CACHE_PATH").map(PathBuf::from)
+    }).unwrap_or_else(|| PathBuf::from("blt_entropy_model.mpk"));
 
+    println!("Loading weights from {:?}", model_path);
     let model = model.load_record(recorder.load(model_path.into(), &device).expect("Failed to load weights"));
     
     // Create output directory
     fs::create_dir_all(&args.output_dir).expect("Failed to create output directory");
     
+    // Default to dataset mode unless text/file is explicitly provided
     if args.text.is_some() || args.file.is_some() {
         // Single file/text mode
         let text = if let Some(t) = args.text { t } else if let Some(f) = args.file {
@@ -206,7 +195,7 @@ fn main() {
         let path = args.output_dir.join("manual_input.safetensors");
         save_safetensors(&path, &emb, &norms, &idxs, &mask, count);
     } else {
-        // Dataset mode
+        // Dataset mode (default)
         println!("Loading FineWeb-Edu dataset ({}/{})...", args.subset, args.split);
         println!("Cache directory: {}", args.cache_dir);
         fs::create_dir_all(&args.cache_dir).expect("Failed to create cache directory");

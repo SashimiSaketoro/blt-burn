@@ -118,7 +118,7 @@ impl<B: Backend> LMTransformer<B> {
             .powf_scalar(2.0)  // Square each element
             .sum_dim(2)        // Sum over dim dimension
             .sqrt()           // Take square root
-            .squeeze::<2>();      // [batch, seq, 1] -> [batch, seq]
+            .reshape([batch_size, seq_len]);      // [batch, seq, 1] -> [batch, seq]
         
         // Now apply normalization for standard output
         x = self.norm.forward(x);

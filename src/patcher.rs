@@ -5,11 +5,14 @@ use burn::{
 pub fn entropy<B: Backend>(scores: Tensor<B, 3>) -> Tensor<B, 2> {
     // scores: [bs, seq_len, vocab]
     // returns: [bs, seq_len]
+    let [bs, seq_len, _vocab] = scores.dims();
     let log_probs = log_softmax(scores, 2);
     let probs = log_probs.clone().exp();
     let p_log_p = log_probs * probs;
-    let entropy = p_log_p.sum_dim(2).neg();
-    entropy.squeeze::<2>()
+    // sum_dim(2) on [bs, seq_len, vocab] -> [bs, seq_len, 1]
+    // Then neg and reshape explicitly to [bs, seq_len]
+    // This avoids squeeze() panicking on batch_size=1
+    p_log_p.sum_dim(2).neg().reshape([bs, seq_len])
 }
 
 pub fn patch_start_mask_from_entropy_with_monotonicity<B: Backend>(
@@ -36,35 +39,6 @@ pub fn patch_start_mask_from_entropy_with_monotonicity<B: Backend>(
     // Construct full mask: [1, condition...]
     let start_mask = Tensor::ones([bs, 1], &entropies.device());
     Tensor::cat(vec![start_mask, condition], 1)
-}
-
-pub fn patch_start_ids_from_patch_start_mask<B: Backend>(
-    patch_start_mask: Tensor<B, 2, Int>,
-) -> Tensor<B, 2, Int> {
-    let [bs, seq_len] = patch_start_mask.dims();
-    
-    // This is tricky in Burn without boolean indexing or nonzero.
-    // We might need to iterate or use a different approach.
-    // For now, since we are running inference on CPU/Metal, maybe we can pull to data?
-    // But we want to keep it on device if possible.
-    
-    // Alternative: Use cumulative sum on the mask to get patch IDs?
-    // Python code:
-    // patch_ids = torch.arange(trunc_seq_len).repeat(bs, 1)
-    // all_patch_ids = torch.cat((patch_ids, extra_patch_ids), dim=1)
-    // patch_start_ids = all_patch_ids[patch_start_mask_padded]
-    
-    // Burn doesn't support boolean indexing like PyTorch yet for variable sized outputs per batch.
-    // However, for BLT, we usually process batch_size=1 for patching in the demo.
-    // Let's assume batch_size=1 for now to simplify, or implement a fixed size approach.
-    
-    // If we assume we want to return just the start indices, we can do it on CPU for now as patching is not the heavy part compared to the model.
-    // But let's try to stay with Tensor ops if possible.
-    
-    // Actually, for the purpose of this port, getting the data back to Rust Vec is probably fine and easier to manipulate.
-    // Let's implement a helper that returns Vec<Vec<usize>>.
-    
-    panic!("Use patch_start_indices_cpu instead");
 }
 
 pub fn patch_start_indices_cpu<B: Backend>(
