@@ -1,19 +1,37 @@
 # BLT-Burn
 
-> **Rust implementation of ByteLatent Transformer (BLT) entropy model with Burn framework, optimized for hypersphere embedding pipelines.**
+> **Partial Rust implementation of ByteLatent Transformer (BLT) entropy model with Burn framework, specifically designed for hypersphere embedding pipelines.**
+
+⚠️ **Note**: This is NOT a complete port of the original BLT repository. This implementation focuses specifically on entropy-based text segmentation and pre-norm signal extraction for hypersphere embeddings. Many features from the original BLT are intentionally omitted.
 
 [![License](https://img.shields.io/badge/License-CC%20BY--NC%204.0-lightgrey.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.70+-orange.svg)](https://www.rust-lang.org/)
 
 ## Overview
 
-BLT-Burn is a complete Rust port of the BLT entropy model, designed for integration with hypersphere-based embedding systems. It provides:
+BLT-Burn is a specialized implementation of select BLT components, extracting only the entropy model and embedding functionality needed for hypersphere-based systems. It provides:
 
 - **Pre-norm signal extraction** - Captures embedding magnitudes before L2 normalization for prominence detection
 - **Entropy-based patching** - Uses model confidence to determine natural segmentation boundaries
 - **Multimodal pre-tokenization** - Supports text, images, audio, and code
 - **Metal acceleration** - Automatically uses Metal on macOS (M1/M2/M3/M4) via WGPU backend
 - **bf16 precision** - Optimized model weights (190MB vs 380MB fp32)
+
+## What This Is / What This Isn't
+
+### ✅ What This Is
+- A focused implementation of BLT's entropy model for text segmentation
+- A tool for extracting pre-norm embeddings for hypersphere placement
+- A preprocessing pipeline for the Sphere water-filling algorithms
+- A high-performance Rust implementation of specific BLT components
+
+### ❌ What This Isn't
+- A complete port of the BLT repository
+- A training framework for BLT models
+- A general-purpose transformer library
+- A replacement for the original BLT implementation
+
+If you need the full BLT functionality, please refer to the [original repository](https://github.com/facebookresearch/blt).
 
 ## Quick Start
 
@@ -121,11 +139,16 @@ blt-burn/
 This project is licensed under the **Creative Commons Attribution-NonCommercial 4.0 International (CC-BY-NC 4.0)** license.
 
 ### Attribution
-This codebase is a Rust/Burn implementation of the ByteLatent Transformer (BLT) architecture.
+This codebase is a partial Rust/Burn implementation of specific components from the ByteLatent Transformer (BLT) architecture.
 - **Original Work**: [BLT (Meta Research)](https://github.com/facebookresearch/blt)
 - **Original License**: CC-BY-NC 4.0
+- **Scope**: This implementation includes only:
+  - The entropy model for text segmentation
+  - Embedding extraction (pre-L2-norm)
+  - Basic tokenization
+  - **NOT included**: Training code, full transformer capabilities, compression features, or other BLT functionality
 - **Modifications**: 
-  - Complete rewrite in Rust using the Burn framework
+  - Implemented select components in Rust using the Burn framework
   - Added multimodal pre-tokenization system
   - Added pre-norm signal extraction for hypersphere integration
   - Optimized for Metal acceleration (Apple Silicon)

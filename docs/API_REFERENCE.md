@@ -1,6 +1,8 @@
 # BLT-Burn Library API Reference
 
-> **Comprehensive documentation for the Rust implementation of ByteLatent Transformer (BLT) with multimodal pre-tokenization and sphere embedding support.**
+> **Documentation for the partial Rust implementation of ByteLatent Transformer (BLT) components, focused on entropy-based segmentation and sphere embedding support.**
+
+⚠️ **Scope Note**: This is a specialized implementation extracting only the BLT components needed for hypersphere embeddings. For full BLT functionality, see the [original repository](https://github.com/facebookresearch/blt).
 
 ---
 
