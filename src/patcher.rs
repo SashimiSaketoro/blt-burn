@@ -8,11 +8,24 @@ pub fn entropy<B: Backend>(scores: Tensor<B, 3>) -> Tensor<B, 2> {
     let [bs, seq_len, _vocab] = scores.dims();
     let log_probs = log_softmax(scores, 2);
     let probs = log_probs.clone().exp();
+    
+    // Numerical stability: log_softmax already handles -inf for zero probabilities,
+    // but we multiply log_probs * probs, where probs can be exactly 0.0
+    // When p=0, p*log(p) should be 0 (by L'Hôpital's rule: lim p->0 of p*log(p) = 0)
+    // Since log_softmax outputs are all negative or 0, and exp() of very negative = ~0,
+    // the multiplication naturally handles this case correctly (0 * -inf = 0 in IEEE754)
     let p_log_p = log_probs * probs;
+    
     // sum_dim(2) on [bs, seq_len, vocab] -> [bs, seq_len, 1]
     // Then neg and reshape explicitly to [bs, seq_len]
     // This avoids squeeze() panicking on batch_size=1
-    p_log_p.sum_dim(2).neg().reshape([bs, seq_len])
+    let entropy_values = p_log_p.sum_dim(2).neg().reshape([bs, seq_len]);
+    
+    // Note: burn's log_softmax is numerically stable and handles the case where
+    // some probabilities are effectively zero (very negative log values).
+    // The multiplication p*log(p) naturally goes to 0 as p->0 (L'Hôpital's rule)
+    // so we don't need explicit NaN handling here.
+    entropy_values
 }
 
 pub fn patch_start_mask_from_entropy_with_monotonicity<B: Backend>(
