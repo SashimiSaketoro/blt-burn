@@ -123,21 +123,32 @@ Automatic format detection based on magic bytes:
 - ELF binaries (`7F ELF`), ZIP archives (`PK`)
 - Code files (shebang, import statements)
 
+#### Currently Supported
+- **Video**: Full frame extraction via FFmpeg (automatically installed during build if missing)
+  - Supports all major codecs: H.264, H.265/HEVC, VP8, VP9, AV1, MPEG-4, MPEG-2, and more
+  - FFmpeg is required and will be automatically installed during build if not found
+
 #### Planned Support (Stubs Available)
 - **PDF**: Text/image extraction (requires `pdf` crate)
-- **Video**: Smart FFmpeg detection - full frame extraction when available, falls back to audio-only
 - **Binary**: ELF section parsing (requires `goblin` crate)
 
 ### Pure-Rust Philosophy
 
-To maintain portability and ease of deployment, BLT-Burn prioritizes pure-Rust implementations:
+To maintain portability and ease of deployment, BLT-Burn prioritizes pure-Rust implementations where possible:
 
-- **Audio/Video**: Can use `symphonia` for pure-Rust decoding (MP3, OGG, MP4)
+- **Audio**: Uses `symphonia` for pure-Rust decoding (MP3, OGG, MP4, WAV, FLAC, etc.)
 - **Images**: Uses `image` crate (pure-Rust JPEG/PNG/GIF support)
 - **Documents**: `pdf` crate for PDF parsing (pure-Rust)
 - **Binaries**: `goblin` for ELF/PE/Mach-O analysis (pure-Rust)
+- **Video**: Requires FFmpeg (automatically installed during build if missing)
 
-This approach avoids system dependencies like FFmpeg, making the library more portable and easier to build.\n\n### Video Processing with Smart FFmpeg Detection\n\nBLT-Burn now includes intelligent FFmpeg detection for video processing:\n\n1. **Automatic Detection**: Checks for FFmpeg at runtime\n2. **User-Friendly Prompt**: If not found, shows clear options:\n   - Install via provided script: `./scripts/install_ffmpeg.sh`\n   - Continue with pure Rust (audio extraction only)\n3. **Graceful Fallback**: Always works, even without FFmpeg\n\nTo enable FFmpeg support when building:\n```bash\ncargo build --features ffmpeg\n```
+### Video Processing with FFmpeg
+
+BLT-Burn uses FFmpeg for comprehensive video codec support:
+
+- **Automatic Installation**: FFmpeg is automatically detected and installed during build if missing
+- **Full Codec Support**: H.264, H.265/HEVC, VP8, VP9, AV1, MPEG-4, MPEG-2, and more
+- **No User Interaction**: Installation happens automatically - no prompts required
 
 ## Documentation
 

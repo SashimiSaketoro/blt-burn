@@ -3,6 +3,7 @@ use blt_burn::{
     tokenizer::BltTokenizer,
     patcher::{patch_start_mask_from_entropy_with_monotonicity, patch_start_indices_cpu},
     dataset::FineWebEduDataset,
+    pretokenize::{detect_modality, ByteSegment, SegmentMetadata},
 };
 use burn::{
     backend::wgpu::{Wgpu, WgpuDevice},
@@ -16,8 +17,18 @@ use safetensors::tensor::{Dtype, TensorView};
 use safetensors::serialize;
 use std::fs::{self, File};
 use std::io::Write;
+use sha2::{Sha256, Digest};
+use serde::{Serialize, Deserialize};
 
 const MAX_TOKENS_PER_FILE: usize = 100_000; // Split large files into parts to prevent RAM explosion
+
+#[derive(Debug, Serialize, Deserialize)]
+struct MetadataSidecar {
+    source_hash: String,
+    total_bytes: usize,
+    modality: String,
+    segments: Vec<ByteSegment>,
+}
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -59,19 +70,42 @@ struct Args {
     cache_dir: String,
 }
 
-fn process_text(
-    text: &str,
+fn compute_hash(data: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(data);
+    hex::encode(hasher.finalize())
+}
+
+fn process_data(
+    data: &[u8],
     model: &LMTransformer<Wgpu>,
-    tokenizer: &BltTokenizer,
     device: &WgpuDevice,
     threshold: f64,
-) -> (Vec<f32>, Vec<f32>, Vec<i32>, Vec<i32>, usize) {
-    let tokens = tokenizer.encode(text);
-    let tokens_vec: Vec<i32> = tokens.iter().map(|&t| t as i32).collect();
+) -> Result<(Vec<f32>, Vec<f32>, Vec<i32>, Vec<i32>, usize, MetadataSidecar), anyhow::Error> {
+    // 1. Compute Hash
+    let source_hash = compute_hash(data);
+
+    // 2. Pre-tokenize
+    let pt_type = detect_modality(data);
+    let pretokenizer = pt_type.create()?;
+    let modality_name = pretokenizer.modality().to_string();
+    
+    let segments = pretokenizer.pre_tokenize(data)?;
+    
+    // 3. Flatten to model inputs
+    let tokens_vec: Vec<i32> = segments.iter()
+        .flat_map(|s| s.bytes.iter().map(|&b| b as i32))
+        .collect();
+        
     let total_tokens = tokens_vec.len();
     
     if total_tokens == 0 {
-        return (vec![], vec![], vec![], vec![], 0);
+        return Ok((vec![], vec![], vec![], vec![], 0, MetadataSidecar {
+            source_hash,
+            total_bytes: 0,
+            modality: modality_name,
+            segments: vec![],
+        }));
     }
 
     let chunk_size = 1024;
@@ -145,9 +179,21 @@ fn process_text(
     
     let patch_indices_i32: Vec<i32> = patch_indices_inner.iter().map(|&x| x as i32).collect();
     
-    (embeddings_f32, norms_f32, patch_indices_i32, patch_mask_vec, total_tokens)
+    let sidecar = MetadataSidecar {
+        source_hash,
+        total_bytes: data.len(),
+        modality: modality_name,
+        segments,
+    };
+    
+    Ok((embeddings_f32, norms_f32, patch_indices_i32, patch_mask_vec, total_tokens, sidecar))
 }
 
+
+fn save_metadata_sidecar(path: &Path, sidecar: &MetadataSidecar) {
+    let file = File::create(path).expect("Failed to create metadata sidecar file");
+    serde_json::to_writer_pretty(file, sidecar).expect("Failed to write metadata sidecar");
+}
 
 fn save_safetensors(
     path: &Path, 
@@ -155,7 +201,8 @@ fn save_safetensors(
     norms_f32: &[f32], 
     patch_indices_i32: &[i32], 
     patch_mask_vec: &[i32], 
-    total_tokens: usize
+    total_tokens: usize,
+    metadata_filename: Option<&str>
 ) {
     // Safety rail: Don't create empty files
     if total_tokens == 0 {
@@ -186,7 +233,12 @@ fn save_safetensors(
         ).unwrap()),
     ];
 
-    let serialized = serialize(tensors, &None).expect("Serialization failed");
+    let mut metadata_map = std::collections::HashMap::new();
+    if let Some(mf) = metadata_filename {
+        metadata_map.insert("metadata_file".to_string(), mf.to_string());
+    }
+
+    let serialized = serialize(tensors, &Some(metadata_map)).expect("Serialization failed");
     let mut file = File::create(path).expect("Failed to create output file");
     file.write_all(&serialized).expect("Failed to write to file");
 }
@@ -196,7 +248,6 @@ fn main() {
     
     let device = WgpuDevice::default();
     type Backend = Wgpu;
-    let tokenizer = BltTokenizer::new(true, true);
     
     // Initialize Model
     let config = LMTransformerConfig {
@@ -221,15 +272,26 @@ fn main() {
     // Default to dataset mode unless text/file is explicitly provided
     if args.text.is_some() || args.file.is_some() {
         // Single file/text mode
-        let text = if let Some(t) = args.text { t } else if let Some(f) = args.file {
-            let bytes = std::fs::read(f).expect("Failed to read input file");
-            String::from_utf8_lossy(&bytes).to_string()
+        let (bytes, filename_prefix) = if let Some(t) = args.text { 
+            (t.into_bytes(), "manual_input".to_string())
+        } else if let Some(f) = args.file {
+            let b = std::fs::read(&f).expect("Failed to read input file");
+            let name = f.file_stem().unwrap().to_string_lossy().to_string();
+            (b, name)
         } else { panic!("Should not happen") };
 
-        println!("Processing single text input...");
-        let (emb, norms, idxs, mask, count) = process_text(&text, &model, &tokenizer, &device, args.threshold);
-        let path = args.output_dir.join("manual_input.safetensors");
-        save_safetensors(&path, &emb, &norms, &idxs, &mask, count);
+        println!("Processing single input ({} bytes)...", bytes.len());
+        match process_data(&bytes, &model, &device, args.threshold) {
+            Ok((emb, norms, idxs, mask, count, sidecar)) => {
+                let metadata_filename = format!("{}.metadata.json", filename_prefix);
+                let metadata_path = args.output_dir.join(&metadata_filename);
+                save_metadata_sidecar(&metadata_path, &sidecar);
+
+                let path = args.output_dir.join(format!("{}.safetensors", filename_prefix));
+                save_safetensors(&path, &emb, &norms, &idxs, &mask, count, Some(&metadata_filename));
+            },
+            Err(e) => println!("Error processing input: {}", e),
+        }
     } else {
         // Dataset mode (default)
         println!("Loading FineWeb-Edu dataset ({}/{})...", args.subset, args.split);
@@ -248,42 +310,52 @@ fn main() {
             // Skip empty
             if item.text.is_empty() { continue; }
             
-            let (emb, norms, idxs, mask, count) = process_text(&item.text, &model, &tokenizer, &device, args.threshold);
-            
-            if count > 0 {
-                // Split into parts if too large to prevent RAM issues
-                let parts = (count + MAX_TOKENS_PER_FILE - 1) / MAX_TOKENS_PER_FILE;
-                
-                if parts == 1 {
-                    // Single file
-                    let filename = format!("item_{}.safetensors", id_str);
-                    let path = args.output_dir.join(filename);
-                    save_safetensors(&path, &emb, &norms, &idxs, &mask, count);
-                } else {
-                    // Split into multiple parts
-                    for part in 0..parts {
-                        let start = part * MAX_TOKENS_PER_FILE;
-                        let end = ((part + 1) * MAX_TOKENS_PER_FILE).min(count);
-                        let part_tokens = end - start;
+            let bytes = item.text.into_bytes();
+            match process_data(&bytes, &model, &device, args.threshold) {
+                Ok((emb, norms, idxs, mask, count, sidecar)) => {
+                    if count > 0 {
+                        // Save metadata sidecar (one per item)
+                        let metadata_filename = format!("item_{}.metadata.json", id_str);
+                        let metadata_path = args.output_dir.join(&metadata_filename);
+                        save_metadata_sidecar(&metadata_path, &sidecar);
+
+                        // Split into parts if too large to prevent RAM issues
+                        let parts = (count + MAX_TOKENS_PER_FILE - 1) / MAX_TOKENS_PER_FILE;
                         
-                        // Extract ranges for this part
-                        let emb_start = start * 768;
-                        let emb_end = end * 768;
-                        
-                        let filename = format!("item_{}_part_{}.safetensors", id_str, part);
-                        let path = args.output_dir.join(filename);
-                        
-                        // Create slices for this part
-                        save_safetensors(
-                            &path, 
-                            &emb[emb_start..emb_end], 
-                            &norms[start..end], 
-                            &idxs,  // Keep all patch indices for context
-                            &mask[start..end], 
-                            part_tokens
-                        );
+                        if parts == 1 {
+                            // Single file
+                            let filename = format!("item_{}.safetensors", id_str);
+                            let path = args.output_dir.join(filename);
+                            save_safetensors(&path, &emb, &norms, &idxs, &mask, count, Some(&metadata_filename));
+                        } else {
+                            // Split into multiple parts
+                            for part in 0..parts {
+                                let start = part * MAX_TOKENS_PER_FILE;
+                                let end = ((part + 1) * MAX_TOKENS_PER_FILE).min(count);
+                                let part_tokens = end - start;
+                                
+                                // Extract ranges for this part
+                                let emb_start = start * 768;
+                                let emb_end = end * 768;
+                                
+                                let filename = format!("item_{}_part_{}.safetensors", id_str, part);
+                                let path = args.output_dir.join(filename);
+                                
+                                // Create slices for this part
+                                save_safetensors(
+                                    &path, 
+                                    &emb[emb_start..emb_end], 
+                                    &norms[start..end], 
+                                    &idxs,  // Keep all patch indices for context
+                                    &mask[start..end], 
+                                    part_tokens,
+                                    Some(&metadata_filename)
+                                );
+                            }
+                        }
                     }
-                }
+                },
+                Err(e) => println!("Error processing item {}: {}", id_str, e),
             }
         }
     }

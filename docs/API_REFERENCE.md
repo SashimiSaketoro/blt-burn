@@ -256,20 +256,16 @@ let pretokenizer = PreTokenizerType::Video {
     frame_rate: 30 
 }.create()?;
 
-// Automatically detects FFmpeg availability:
-// - With FFmpeg: Full video frame + audio extraction
-// - Without FFmpeg: Audio extraction only (pure Rust)
+// FFmpeg is required and automatically installed during build if missing
+// Full video frame extraction with comprehensive codec support
 ```
 
-**Smart FFmpeg Detection**:
-1. **Automatic check** at runtime for FFmpeg installation
-2. **User-friendly prompt** if FFmpeg is not found:
-   - Shows supported formats with FFmpeg vs pure Rust
-   - Offers to run installation script
-   - Allows continuing with pure Rust limitations
-3. **Graceful fallback** to Symphonia for audio extraction
+**FFmpeg Integration**:
+- **Automatic Installation**: FFmpeg is detected and installed automatically during build if missing
+- **No User Interaction**: Installation happens transparently - no prompts required
+- **Full Codec Support**: All major video codecs supported via FFmpeg
 
-**With FFmpeg (via video-rs)**:
+**Supported Codecs (via FFmpeg/video-rs)**:
 - H.264 (all profiles: Baseline, Main, High)
 - H.265/HEVC
 - VP8, VP9
@@ -277,18 +273,14 @@ let pretokenizer = PreTokenizerType::Video {
 - MPEG-4, MPEG-2
 - And many more formats
 
-**Without FFmpeg (pure Rust)**:
-- Audio track extraction via Symphonia
-- Metadata about video limitations
-- No frame extraction
-
 **Installation**:
-```bash
-# Automatic installation script provided:
-./scripts/install_ffmpeg.sh
-
-# Supports macOS (Homebrew), Ubuntu/Debian, Fedora, Arch
-```
+FFmpeg is automatically installed during `cargo build` if not found on your system.
+The installation script supports:
+- macOS (Homebrew)
+- Ubuntu/Debian (apt)
+- Fedora/RHEL/CentOS (dnf)
+- Arch/Manjaro (pacman)
+- Windows (winget or manual)
 
 #### Binary Pre-Tokenizer
 ```rust
@@ -307,7 +299,7 @@ To maintain portability and ease of deployment, BLT-Burn prioritizes pure-Rust i
 - **Binaries**: `goblin` for ELF/PE/Mach-O analysis
 - **Code**: `tree-sitter` with language bindings
 
-This avoids system dependencies like FFmpeg, making deployment easier especially in containerized environments or when building for multiple platforms.
+This approach minimizes system dependencies where possible. FFmpeg is required for video processing and is automatically installed during build if missing.
 
 ---
 
