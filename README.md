@@ -99,10 +99,45 @@ cargo run --bin ingest
 - ✅ **Pre-L2-Norm Signal Extraction** - Preserves magnitude variance for prominence detection
 - ✅ **Entropy-Based Patching** - Monotonic boundary detection using model confidence
 - ✅ **Multimodal Support** - Text, images, audio, code pre-tokenization
+- ✅ **Pure-Rust Approach** - No system dependencies for core functionality
 - ✅ **Metal Acceleration** - Automatic GPU acceleration on macOS
 - ✅ **bf16 Precision** - 50% smaller model size with maintained accuracy
 - ✅ **FineWeb-Edu Integration** - Built-in dataset utilities
 - ✅ **Water-Filling Ready** - Output format optimized for hypersphere pipelines
+
+### Multimodal Pre-Tokenization
+
+BLT-Burn includes a comprehensive pre-tokenization system that handles diverse data types:
+
+#### Currently Supported
+- **Text**: Raw UTF-8 bytes (BLT-style), HuggingFace tokenizers, or simple whitespace
+- **Images**: JPEG/PNG decoding to RGB pixels with adaptive entropy-based patch merging
+- **Audio**: WAV decoding to PCM samples with frame-based segmentation
+- **Code**: AST-aware segmentation using tree-sitter (Rust, Python)
+
+#### Detection & Routing
+Automatic format detection based on magic bytes:
+- JPEG (`FF D8`), PNG (`89 PNG`)
+- PDF (`%PDF-`), MP4/Video (`ftyp`)
+- WAV (`RIFF`), MP3 (`ID3` or sync bytes)
+- ELF binaries (`7F ELF`), ZIP archives (`PK`)
+- Code files (shebang, import statements)
+
+#### Planned Support (Stubs Available)
+- **PDF**: Text/image extraction (requires `pdf` crate)
+- **Video**: Frame extraction (requires `ffmpeg-next` or pure-Rust alternatives)
+- **Binary**: ELF section parsing (requires `goblin` crate)
+
+### Pure-Rust Philosophy
+
+To maintain portability and ease of deployment, BLT-Burn prioritizes pure-Rust implementations:
+
+- **Audio/Video**: Can use `symphonia` for pure-Rust decoding (MP3, OGG, MP4)
+- **Images**: Uses `image` crate (pure-Rust JPEG/PNG/GIF support)
+- **Documents**: `pdf` crate for PDF parsing (pure-Rust)
+- **Binaries**: `goblin` for ELF/PE/Mach-O analysis (pure-Rust)
+
+This approach avoids system dependencies like FFmpeg, making the library more portable and easier to build.
 
 ## Documentation
 
@@ -166,5 +201,5 @@ Contributions welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guideli
 ---
 
 **Version**: 0.1.0  
-**Last Updated**: 2025-11-19
+**Last Updated**: 2025-11-20
 

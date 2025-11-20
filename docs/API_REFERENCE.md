@@ -138,7 +138,7 @@ let tokenizer = BltTokenizer::new_with_bpe(true, true, bpe);
 
 ### Overview
 
-The pre-tokenization system segments raw data into semantically meaningful byte chunks **before** entropy analysis. This provides deterministic structure that helps with sphere organization.
+The pre-tokenization system segments raw data into semantically meaningful byte chunks **before** entropy analysis. This provides deterministic structure that helps with sphere organization. The framework prioritizes pure-Rust implementations to avoid system dependencies.
 
 ### Core Trait
 
@@ -155,35 +155,59 @@ pub struct ByteSegment {
 }
 ```
 
-### Text Pre-Tokenizer
+### Automatic Format Detection
 
 ```rust
-use blt_burn::pretokenize::{TextPreTokenizer, ModalityPreTokenizer};
+use blt_burn::pretokenize::detect_modality;
 
-// Simple whitespace tokenization
-let pretokenizer = TextPreTokenizer::new_simple()?;
-let segments = pretokenizer.pre_tokenize(b"Hello world")?;
-
-// From tokenizer file
-let pretokenizer = TextPreTokenizer::from_file("tokenizer.json")?;
+let data = std::fs::read("file.unknown")?;
+let pt_type = detect_modality(&data);
+let segments = pt_type.create()?.pre_tokenize(&data)?;
 ```
 
-### Image Pre-Tokenizer
+### Text Pre-Tokenizers
 
 ```rust
 use blt_burn::pretokenize::{PreTokenizerType, ModalityPreTokenizer};
 
-let pretokenizer = PreTokenizerType::Image {
-    patch_size: 196,  // 14x14 at 1 byte/pixel
-    stride: 196,
+// Raw UTF-8 bytes (BLT-style)
+let pretokenizer = PreTokenizerType::TextRaw.create()?;
+let segments = pretokenizer.pre_tokenize(b"Hello world")?;
+
+// HuggingFace tokenizer
+let pretokenizer = PreTokenizerType::TextFromFile {
+    path: "tokenizer.json".to_string(),
 }.create()?;
 
-let image_bytes = std::fs::read("image.raw")?;
+// Simple whitespace tokenization
+let pretokenizer = PreTokenizerType::TextSimple.create()?;
+```
+
+### Image Pre-Tokenizer
+
+Decodes JPEG/PNG to RGB pixels, creates patches with adaptive entropy-based merging:
+
+```rust
+let pretokenizer = PreTokenizerType::Image {
+    patch_size: 16,   // 16x16 pixels
+    stride: 16,       // Non-overlapping
+}.create()?;
+
+let image_bytes = std::fs::read("image.jpg")?;
 let patches = pretokenizer.pre_tokenize(&image_bytes)?;
-// Each patch is a ByteSegment with metadata
+
+// Patches include entropy metadata for adaptive processing
+for patch in patches {
+    if let Some(meta) = patch.metadata {
+        let entropy = meta.extra["local_entropy"].as_f64().unwrap();
+        // Low-entropy patches may have been merged
+    }
+}
 ```
 
 ### Audio Pre-Tokenizer
+
+Currently supports WAV decoding to PCM frames:
 
 ```rust
 let pretokenizer = PreTokenizerType::Audio {
@@ -191,21 +215,68 @@ let pretokenizer = PreTokenizerType::Audio {
     sample_rate: 16000,
 }.create()?;
 
-let audio = std::fs::read("audio.raw")?;
-let frames = pretokenizer.pre_tokenize(&audio)?;
+let wav_data = std::fs::read("audio.wav")?;
+let frames = pretokenizer.pre_tokenize(&wav_data)?;
 ```
+
+**Future**: Pure-Rust `symphonia` integration for MP3/OGG/MP4 support.
 
 ### Code Pre-Tokenizer
 
+AST-aware segmentation using tree-sitter:
+
 ```rust
 let pretokenizer = PreTokenizerType::Code {
-    language: "rust".to_string(),
+    language: "rust".to_string(),  // or "python"
 }.create()?;
 
 let code = std::fs::read("main.rs")?;
-let lines = pretokenizer.pre_tokenize(&code)?;
-// Currently line-based; tree-sitter integration planned
+let segments = pretokenizer.pre_tokenize(&code)?;
+
+// Segments are semantic units: functions, structs, classes
+for seg in segments {
+    println!("Found: {}", seg.label.unwrap()); // e.g., "function_item"
+}
 ```
+
+### Planned Pre-Tokenizers (Stubs Available)
+
+#### PDF Pre-Tokenizer
+```rust
+// Requires: pdf = "0.9" in Cargo.toml
+let pretokenizer = PreTokenizerType::Pdf { 
+    extract_text: true 
+}.create()?;
+// Currently returns error, implement with pdf crate
+```
+
+#### Video Pre-Tokenizer
+```rust
+// Options: ffmpeg-next (system dep) or symphonia (pure-Rust)
+let pretokenizer = PreTokenizerType::Video { 
+    frame_rate: 30 
+}.create()?;
+// Currently returns error, implement with chosen backend
+```
+
+#### Binary Pre-Tokenizer
+```rust
+// Requires: goblin = "0.8" in Cargo.toml
+let pretokenizer = PreTokenizerType::Binary.create()?;
+// Parses ELF sections, PE segments, etc.
+```
+
+### Pure-Rust Philosophy
+
+To maintain portability and ease of deployment, BLT-Burn prioritizes pure-Rust implementations:
+
+- **Images**: `image` crate (JPEG, PNG, GIF, BMP, etc.)
+- **Audio**: `hound` for WAV, planned `symphonia` for MP3/OGG/MP4
+- **Documents**: `pdf` crate for PDF parsing
+- **Binaries**: `goblin` for ELF/PE/Mach-O analysis
+- **Code**: `tree-sitter` with language bindings
+
+This avoids system dependencies like FFmpeg, making deployment easier especially in containerized environments or when building for multiple platforms.
 
 ---
 
@@ -319,6 +390,74 @@ let dataset = FineWebEduDataset::new(
 for item in dataset.iter().take(100) {
     println!("Processing: {}", item.id.unwrap_or_default());
     // item.text contains the document
+}
+```
+
+### Handling Large Multimodal Datasets (e.g., MINT-1T)
+
+For massive datasets like MINT-1T (1 trillion tokens, mixed modalities), use Burn's dataset transforms:
+
+```rust
+use burn::data::dataset::transform::{
+    ComposedDataset, PartialDataset, SamplerDataset, 
+    WindowsDataset, ShuffledDataset
+};
+
+// Assume MINT-1T loaded from Parquet
+struct Mint1TDataset { /* ... */ }
+impl Dataset<MintItem> for Mint1TDataset { /* ... */ }
+
+// 1. Compose multiple shards
+let shard1 = Mint1TDataset::new("mint-1t-shard-001.parquet");
+let shard2 = Mint1TDataset::new("mint-1t-shard-002.parquet");
+let composed = ComposedDataset::new(vec![shard1, shard2]);
+
+// 2. Take a subset to avoid OOM
+let partial = PartialDataset::new(composed, 0..1_000_000);
+
+// 3. Sample for balanced modalities
+let sampled = SamplerDataset::new(partial, 10_000, true);
+
+// 4. Shuffle for training
+let shuffled = ShuffledDataset::new(sampled, 42);
+
+// 5. Process with automatic format detection
+for item in shuffled.iter() {
+    // Detect and process each field
+    if let Some(text) = item.text {
+        let pt_type = detect_modality(&text);
+        let segments = pt_type.create()?.pre_tokenize(&text)?;
+    }
+    if let Some(image) = item.image_bytes {
+        let pt_type = detect_modality(&image);
+        let segments = pt_type.create()?.pre_tokenize(&image)?;
+    }
+}
+```
+
+### Streaming Large Files
+
+For files too large to fit in memory:
+
+```rust
+use std::io::{BufReader, Read};
+
+fn process_large_file(path: &str) -> Result<()> {
+    let file = std::fs::File::open(path)?;
+    let mut reader = BufReader::new(file);
+    let mut buffer = vec![0u8; 1024 * 1024]; // 1MB chunks
+    
+    while let Ok(n) = reader.read(&mut buffer) {
+        if n == 0 { break; }
+        
+        let chunk = &buffer[..n];
+        let pt_type = detect_modality(chunk);
+        match pt_type.create()?.pre_tokenize(chunk) {
+            Ok(segments) => process_segments(segments),
+            Err(_) => continue, // Skip unparseable chunks
+        }
+    }
+    Ok(())
 }
 ```
 
@@ -538,6 +677,6 @@ hf_hub_download(
 
 ---
 
-**Last Updated**: 2025-11-19  
+**Last Updated**: 2025-11-20  
 **Version**: 0.1.0  
 **Maintainer**: BLT-Burn Contributors
