@@ -1,8 +1,8 @@
 # BLT-Burn Library API Reference
 
-> **Documentation for the partial Rust implementation of ByteLatent Transformer (BLT) components, focused on entropy-based segmentation and sphere embedding support.**
+> **Documentation for the Rust implementation of ByteLatent Transformer (BLT) components, focused on entropy-based segmentation, pre-norm signal extraction, and multimodal data processing.**
 
-⚠️ **Scope Note**: This is a specialized implementation extracting only the BLT components needed for hypersphere embeddings. For full BLT functionality, see the [original repository](https://github.com/facebookresearch/blt).
+⚠️ **Scope Note**: This is a specialized implementation of BLT components for embedding extraction and semantic segmentation. For full BLT functionality, see the [original repository](https://github.com/facebookresearch/blt).
 
 ---
 
@@ -15,7 +15,7 @@
 5. [Model Architecture](#model-architecture)
 6. [Entropy & Patching](#entropy--patching)
 7. [Dataset Integration](#dataset-integration)
-8. [Water-Filling Integration](#water-filling-integration)
+8. [Output Format](#output-format)
 9. [Usage Examples](#usage-examples)
 10. [Configuration Reference](#configuration-reference)
 
@@ -27,13 +27,13 @@
 
 ```
 ┌──────────────┐     ┌──────────────┐     ┌──────────────┐     ┌──────────────┐
-│  Raw Data    │────▶│ Pre-Tokenize │────▶│ BLT Entropy  │────▶│   Sphere     │
-│ (multimodal) │     │  (semantic)  │     │    Model     │     │ Water-Fill   │
+│  Raw Data    │────▶│ Pre-Tokenize │────▶│ BLT Entropy  │────▶│   Processed  │
+│ (multimodal) │     │  (semantic)  │     │    Model     │     │   Output     │
 └──────────────┘     └──────────────┘     └──────────────┘     └──────────────┘
                             │                     │                     │
                             ▼                     ▼                     ▼
-                     HypergraphSidecar     Pre-norm Embeddings   Hypersphere Coords
-                     (Trunk/Branch/Leaf)   + Prominence Scores   + Shell Assignments
+                     HypergraphSidecar     Pre-norm Embeddings   Tensors & Metadata
+                     (Trunk/Branch/Leaf)   + Prominence Scores
 ```
 
 ### Key Design Principles
@@ -42,7 +42,7 @@
 2. **Pre-L2-Norm Signal Extraction**: Captures embedding norms *before* L2 normalization for prominence
 3. **Entropy-Based Boundaries**: Uses model confidence (entropy) to determine natural segmentation
 4. **Hypergraph Topology**: Explicitly models the hierarchical relationship between File (Trunk), Modality (Branch), and Patch (Leaf).
-5. **Sphere-Ready Output**: Produces embeddings and prominence scores ready for hypersphere organization
+5. **Efficient Export**: Produces embeddings and metadata in safetensors and SQLite formats for downstream processing
 
 ---
 
@@ -64,9 +64,8 @@ blt-burn/
 │   ├── API_REFERENCE.md   # This file
 │   └── PRENORM_SIGNAL_SUMMARY.md
 └── scripts/
-    ├── water_filling_integration.py
     ├── demo_prenorm_signal.py
-    └── inspect_sphere_result.py
+    └── inspect_blt_result.py
 ```
 
 ---
@@ -80,7 +79,6 @@ Simple byte-level tokenizer with optional BPE delimiters.
 ```rust
 use blt_burn::tokenizer::BltTokenizer;
 
-// Basic usage
 let tokenizer = BltTokenizer::new(
     true,  // add_bos
     true   // add_eos
@@ -140,7 +138,7 @@ let tokenizer = BltTokenizer::new_with_bpe(true, true, bpe);
 
 ### Overview
 
-The pre-tokenization system segments raw data into semantically meaningful byte chunks **before** entropy analysis. This provides deterministic structure that helps with sphere organization. The framework prioritizes pure-Rust implementations to avoid system dependencies.
+The pre-tokenization system segments raw data into semantically meaningful byte chunks **before** entropy analysis. This provides deterministic structure that helps with downstream processing. The framework prioritizes pure-Rust implementations to avoid system dependencies.
 
 ### Core Trait
 
@@ -176,12 +174,10 @@ use blt_burn::pretokenize::{PreTokenizerType, ModalityPreTokenizer};
 let pretokenizer = PreTokenizerType::TextRaw.create()?;
 let segments = pretokenizer.pre_tokenize(b"Hello world")?;
 
-// HuggingFace tokenizer
 let pretokenizer = PreTokenizerType::TextFromFile {
     path: "tokenizer.json".to_string(),
 }.create()?;
 
-// Simple whitespace tokenization
 let pretokenizer = PreTokenizerType::TextSimple.create()?;
 ```
 
@@ -338,7 +334,7 @@ let model = config.init::<Wgpu>(&device);
 
 ### Model Output Structure
 
-**Critical for sphere integration:**
+**Critical for downstream processing:**
 
 ```rust
 pub struct ModelOutput<B: Backend> {
@@ -356,7 +352,7 @@ pub struct ModelOutput<B: Backend> {
 - Pre-norm embeddings preserve natural magnitude differences
 - `embedding_norms` provides the prominence signal for downstream processing
 - `entropies` captures model uncertainty at each position
-- `coherence_scores` (pre_norm² / entropy) enables Orch-OR quantum allocation
+- `coherence_scores` (pre_norm² / entropy) enables advanced allocation strategies
 
 ### Forward Pass
 
@@ -364,9 +360,8 @@ pub struct ModelOutput<B: Backend> {
 let tokens = Tensor::<Wgpu, 2, Int>::from_data([[1, 76, 105, 112, 112, 115]], &device);
 let output = model.forward_with_embeddings(tokens);
 
-// Extract for sphere processing
-let embeddings = output.pre_norm_embeddings;  // DON'T use post-norm!
-let prominence = output.embedding_norms;      // Water-filling input
+let embeddings = output.pre_norm_embeddings;  // [1, seq_len, 768]
+let prominence = output.embedding_norms;       // [1, seq_len]
 ```
 
 ---
@@ -400,61 +395,6 @@ let mask = patch_start_mask_from_entropy_with_monotonicity(
 
 let patch_indices = patch_start_indices_cpu(mask);
 // patch_indices[0] = [0, 15, 42, 87, ...]  // Start positions
-```
-
----
-
-## Orch-OR Quantum Coherence Mode
-
-### Overview
-
-The Orch-OR (Orchestrated Objective Reduction) mode implements a Penrose-Hameroff inspired allocation strategy where hypersphere volume is distributed proportional to "proto-conscious moments":
-
-```
-allocation ∝ pre_norm² × exp(-entropy / T)
-```
-
-This biases retrieval toward patches with high coherence (low entropy) AND high prominence (large pre-norm), representing the model's most significant "aha" moments.
-
-### Usage
-
-```bash
-# Run ingestion (automatically exports entropy and coherence)
-cargo run --release --bin ingest -- --file input.txt --output-dir output/
-
-# Apply Orch-OR water-filling
-python scripts/water_filling_integration.py \
-    --input output/ \
-    --orch-or \
-    --orch-or-temperature 1e-5
-```
-
-### Testing
-
-```bash
-# Validate implementation
-python scripts/test_orch_or.py --input output/item_0.safetensors
-
-# Temperature sweep to find optimal T
-python scripts/test_orch_or.py --input output/item_0.safetensors --temperature 1e-6
-```
-
-### Parameters
-
-- `--orch-or`: Enable Orch-OR mode (flag)
-- `--orch-or-temperature`: Planck temperature T (default: 1e-5)
-  - Lower T (1e-6): Sharper bias toward low-entropy patches
-  - Higher T (1e-4): Softer bias, more classical behavior
-
-### Theory
-
-Maps Penrose-Hameroff quantum consciousness to embedding geometry:
-- **Superposition size**: pre_norm (how "big" the quantum state is)
-- **Objective reduction**: entropy spike (when coherence collapses)
-- **Conscious volume**: sphere allocation (how much "reality" this patch gets)
-
-High-coherence patches dominate the hypersphere center, while confused/noisy regions compress to poles.
-
 ```
 
 **Monotonicity constraint**: Prevents backwards jumps, enforcing left-to-right patch growth.
@@ -550,55 +490,61 @@ fn process_large_file(path: &str) -> Result<()> {
 
 ---
 
-## Water-Filling Integration
+## Output Format
 
-### Output Format
+### Tensor Data (`.safetensors`)
 
-The `ingest` binary produces matched pairs of files for every input item:
+Header: Contains `metadata_file` key pointing to the SQLite sidecar.
 
-1. **Tensor Data (`.safetensors`)**:
-   - Header: Contains `metadata_file` key pointing to the SQLite sidecar.
-   - Tensors:
+Tensors:
 ```python
 {
     "embeddings": [batch, seq_len, 768],      # Pre-norm!
     "prominence": [batch, seq_len],           # L2 norms
+    "entropies": [batch, seq_len],            # Shannon entropy
+    "coherence_scores": [batch, seq_len],     # pre_norm² / entropy
     "patch_indices": [num_patches],           # Start positions
     "patch_mask": [batch, seq_len],           # Binary mask
 }
 ```
 
-2. **Hypergraph Sidecar (`.hypergraph.db`)**:
-   - SQLite database with bincode-serialized nodes and edges
-   - Compact, random-access friendly storage
-   - JAX sharding support for distributed processing
-   - Schema:
-     ```sql
-     CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-     CREATE TABLE nodes (id INTEGER PRIMARY KEY, data BLOB NOT NULL);
-     CREATE TABLE hyperedges (id INTEGER PRIMARY KEY, vertices BLOB NOT NULL, data BLOB NOT NULL);
-     ```
-   - Export to JSON for debugging with `--export-json` flag
-   - Format (when exported as JSON):
-     ```json
-     {
-       "nodes": [
-         { "Trunk": { "source_hash": "...", "total_bytes": 1024 } },
-         { "Branch": { "label": "video_stream", "modality": "video" } },
-         { "Leaf": { "bytes": [], "label": "frame_0", "metadata": { ... } } }
-       ],
-       "edges": [
-         { "label": "contains", "weight": 1.0 },
-         { "label": "next", "weight": 1.0 }
-       ],
-       "topology": {
-         "edges": [
-           [0, [0, 1]], // Edge 0 connects Node 0 -> Node 1
-           [1, [1, 2]]  // Edge 1 connects Node 1 -> Node 2
-         ]
-       }
-     }
-     ```
+### Hypergraph Sidecar (`.hypergraph.db`)
+
+SQLite database with bincode-serialized nodes and edges
+
+Compact, random-access friendly storage
+
+JAX sharding support for distributed processing
+
+Schema:
+```sql
+CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE nodes (id INTEGER PRIMARY KEY, data BLOB NOT NULL);
+CREATE TABLE hyperedges (id INTEGER PRIMARY KEY, vertices BLOB NOT NULL, data BLOB NOT NULL);
+```
+
+Export to JSON for debugging with `--export-json` flag
+
+Format (when exported as JSON):
+```json
+{
+  "nodes": [
+    { "Trunk": { "source_hash": "...", "total_bytes": 1024 } },
+    { "Branch": { "label": "video_stream", "modality": "video" } },
+    { "Leaf": { "bytes": [], "label": "frame_0", "metadata": { ... } } }
+  ],
+  "edges": [
+    { "label": "contains", "weight": 1.0 },
+    { "label": "next", "weight": 1.0 }
+  ],
+  "topology": {
+    "edges": [
+      [0, [0, 1]], // Edge 0 connects Node 0 -> Node 1
+      [1, [1, 2]]  // Edge 1 connects Node 1 -> Node 2
+    ]
+  }
+}
+```
 
 ### Python Integration
 
@@ -612,7 +558,7 @@ from safetensors.numpy import load_file
 tensor_path = Path("ingest_output/item_0.safetensors")
 data = load_file(tensor_path)
 embeddings = data["embeddings"]    # Pre-norm embeddings
-prominence = data["prominence"]    # For water-filling
+prominence = data["prominence"]    # For processing
 
 # 2. Load Hypergraph Sidecar
 # From SQLite (primary format)
@@ -631,20 +577,13 @@ nodes = hypergraph['nodes']
 trunk = next(n['Trunk'] for n in nodes if 'Trunk' in n)
 print(f"Processing {trunk['source_hash']} content")
 
-# 3. Apply water-filling (osmotic or THRML)
-from water_filling_integration import osmotic_water_filling
-sphere_coords, radii, shells = osmotic_water_filling(
-    embeddings=embeddings,
-    prominence_scores=prominence,
-    target_shells=512,
-    capacity_exponent=1.5
-)
+# 3. Process embeddings (e.g., normalize, cluster, etc.)
+# Apply your application-specific logic here
+processed_embeddings = your_processing_function(embeddings, prominence)
 
-# Save sphere results
-np.savez("sphere_results/item_0.npz",
-    sphere_coords=sphere_coords,
-    radii=radii,
-    shells=shells,
+# Save results
+np.savez("processed_results/item_0.npz",
+    processed_embeddings=processed_embeddings,
     original_prominence=prominence
 )
 ```
@@ -687,7 +626,7 @@ Each shard includes sharding metadata:
 
 Load in JAX:
 ```python
-from scripts.water_filling_integration import load_sharded_blt_output_jax
+from scripts.blt_loader import load_sharded_blt_output_jax
 
 # Automatic JAX distributed loading
 data = load_sharded_blt_output_jax(
@@ -699,8 +638,8 @@ data = load_sharded_blt_output_jax(
 embeddings = data['embeddings']  # Sharded JAX array
 prominence = data['prominence']  # Sharded JAX array
 
-# Apply distributed water-filling
-sphere_coords = distributed_water_filling(embeddings, prominence)
+# Apply distributed processing
+processed = your_distributed_function(embeddings, prominence)
 ```
 
 ---
@@ -741,7 +680,7 @@ fn main() -> anyhow::Result<()> {
         .reshape([1, tokens.len()]);
     let output = model.forward_with_embeddings(input);
     
-    // Extract for sphere
+    // Extract for processing
     let embeddings = output.pre_norm_embeddings;  // [1, seq_len, 768]
     let prominence = output.embedding_norms;       // [1, seq_len]
     
@@ -849,18 +788,17 @@ Recommended threshold: 1.35 (Mean size 127.3 closest to target 128)
 
 ### Integration Parameters
 
-The specific parameters for hypersphere organization (shells, radii, etc.) depend on your downstream processing pipeline and should be tuned based on your specific use case.
+The specific parameters for downstream processing (e.g., clustering, dimensionality reduction) depend on your application and should be tuned based on your specific use case.
 
 ---
 
-## Integration Checklist for Sphere Development
+## Integration Checklist
 
 - [ ] Consume `.safetensors` files from `ingest_output/`
 - [ ] Use `embeddings` field (pre-norm, **not** post-norm)
-- [ ] Use `prominence` field for water-filling prominence scores
+- [ ] Use `prominence` field for signal strength
 - [ ] Respect `patch_indices` for semantic boundaries
-- [ ] Output `.npz` files with `sphere_coords`, `radii`, `shells`
-- [ ] Maintain `original_prominence` for analysis
+- [ ] Load hypergraph sidecar for structural metadata
 - [ ] Support multimodal inputs via `pretokenize` module
 
 ---
@@ -903,11 +841,10 @@ hf_hub_download(
 ## Further Reading
 
 - [Pre-L2-Norm Signal Extraction](./PRENORM_SIGNAL_SUMMARY.md)
-- [Water-Filling Integration](../scripts/water_filling_integration.py)
 - [Rust Burn Book](https://burn.dev/book/)
 
 ---
 
-**Last Updated**: 2025-11-20  
-**Version**: 0.2.0  
+**Last Updated**: 2025-11-21  
+**Version**: 0.3.0  
 **Maintainer**: BLT-Burn Contributors
