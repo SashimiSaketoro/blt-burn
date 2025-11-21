@@ -24,27 +24,9 @@ You asked about extracting information **PRE L2 normalization** from the BLT mod
    - Integration patterns for both algorithms
    - Code examples and expected results
 
-### 4. **Live Demonstration** (`demo_prenorm_signal.py`)
-   - Just ran it - shows **37 BILLION times** more variance in pre-norm!
-   - Visualization saved to `docs/prenorm_signal_demo.png`
-
-## Key Results from Demo
-
-```
-PRE-NORMALIZATION:
-  Mean:     25.45
-  Std Dev:  13.14  ← RICH SIGNAL
-  Range:    52.35
-  Outliers: 134 (13.4%)  ✅ Detectable!
-
-POST-NORMALIZATION:
-  Mean:     1.0000
-  Std Dev:  0.0000000003  ← NO SIGNAL
-  Range:    0.0000000010
-  Outliers: 0  ❌ All identical!
-
-SIGNAL RATIO: 37,000,000,000x more information in pre-norm!
-```
+### 4. **Demonstration Script** (`demo_prenorm_signal.py`)
+   - Script available to demonstrate the difference between pre-norm and post-norm signals
+   - Shows how L2 normalization removes variance from embeddings
 
 ## How to Use
 
@@ -81,9 +63,10 @@ Post-normalization destroys this signal completely - all points become L2=1.0.
 ## Files in This Repository
 
 1. `src/model.rs` - BLT transformer with pre-norm extraction
-2. `scripts/water_filling_integration.py` - Python water-filling integration
+2. `scripts/water_filling_integration.py` - Python water-filling integration (updated for SQLite hypergraph sidecars)
 3. `docs/PRE_NORM_SIGNAL_EXTRACTION.md` - Technical documentation
 4. `scripts/demo_prenorm_signal.py` - Signal demonstration script
-5. `docs/prenorm_signal_demo.png` - Visualization output
+5. `src/sidecar.rs` - Hypergraph sidecar implementation (new in v0.2)
+6. `src/ffmpeg.rs` - User-controlled FFmpeg integration (new in v0.2)
 
 Ready to integrate with your TheSphere water-filling pipeline! 🚀

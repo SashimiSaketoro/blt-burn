@@ -1,8 +1,8 @@
 # BLT-Burn Library API Reference
 
-> **Documentation for the partial Rust implementation of ByteLatent Transformer (BLT) components, focused on entropy-based segmentation and sphere embedding support.**
+> **Documentation for the Rust implementation of ByteLatent Transformer (BLT) components, focused on entropy-based segmentation, pre-norm signal extraction, and multimodal data processing.**
 
-⚠️ **Scope Note**: This is a specialized implementation extracting only the BLT components needed for hypersphere embeddings. For full BLT functionality, see the [original repository](https://github.com/facebookresearch/blt).
+⚠️ **Scope Note**: This is a specialized implementation of BLT components for embedding extraction and semantic segmentation. For full BLT functionality, see the [original repository](https://github.com/facebookresearch/blt).
 
 ---
 
@@ -15,7 +15,7 @@
 5. [Model Architecture](#model-architecture)
 6. [Entropy & Patching](#entropy--patching)
 7. [Dataset Integration](#dataset-integration)
-8. [Water-Filling Integration](#water-filling-integration)
+8. [Output Format](#output-format)
 9. [Usage Examples](#usage-examples)
 10. [Configuration Reference](#configuration-reference)
 
@@ -27,13 +27,13 @@
 
 ```
 ┌──────────────┐     ┌──────────────┐     ┌──────────────┐     ┌──────────────┐
-│  Raw Data    │────▶│ Pre-Tokenize │────▶│ BLT Entropy  │────▶│   Sphere     │
-│ (multimodal) │     │  (semantic)  │     │    Model     │     │ Water-Fill   │
+│  Raw Data    │────▶│ Pre-Tokenize │────▶│ BLT Entropy  │────▶│   Processed  │
+│ (multimodal) │     │  (semantic)  │     │    Model     │     │   Output     │
 └──────────────┘     └──────────────┘     └──────────────┘     └──────────────┘
                             │                     │                     │
                             ▼                     ▼                     ▼
-                     ByteSegments          Pre-norm Embeddings   Hypersphere Coords
-                     + Metadata            + Prominence Scores   + Shell Assignments
+                     HypergraphSidecar     Pre-norm Embeddings   Tensors & Metadata
+                     (Trunk/Branch/Leaf)   + Prominence Scores
 ```
 
 ### Key Design Principles
@@ -41,7 +41,8 @@
 1. **Modality Agnostic**: Accepts any byte stream (text, images, audio, code, etc.)
 2. **Pre-L2-Norm Signal Extraction**: Captures embedding norms *before* L2 normalization for prominence
 3. **Entropy-Based Boundaries**: Uses model confidence (entropy) to determine natural segmentation
-4. **Sphere-Ready Output**: Produces embeddings and prominence scores ready for hypersphere organization
+4. **Hypergraph Topology**: Explicitly models the hierarchical relationship between File (Trunk), Modality (Branch), and Patch (Leaf).
+5. **Efficient Export**: Produces embeddings and metadata in safetensors and SQLite formats for downstream processing
 
 ---
 
@@ -57,14 +58,14 @@ blt-burn/
 │   ├── pretokenize.rs     # Multimodal pre-tokenization framework
 │   ├── patcher.rs         # Entropy calculation & patch extraction
 │   ├── dataset.rs         # FineWeb-Edu and dataset utilities
+│   ├── sidecar.rs         # Hypergraph DTO and builder
 │   └── lib.rs             # Public API exports
 ├── docs/
 │   ├── API_REFERENCE.md   # This file
 │   └── PRENORM_SIGNAL_SUMMARY.md
 └── scripts/
-    ├── water_filling_integration.py
     ├── demo_prenorm_signal.py
-    └── inspect_sphere_result.py
+    └── inspect_blt_result.py
 ```
 
 ---
@@ -78,7 +79,6 @@ Simple byte-level tokenizer with optional BPE delimiters.
 ```rust
 use blt_burn::tokenizer::BltTokenizer;
 
-// Basic usage
 let tokenizer = BltTokenizer::new(
     true,  // add_bos
     true   // add_eos
@@ -138,7 +138,7 @@ let tokenizer = BltTokenizer::new_with_bpe(true, true, bpe);
 
 ### Overview
 
-The pre-tokenization system segments raw data into semantically meaningful byte chunks **before** entropy analysis. This provides deterministic structure that helps with sphere organization.
+The pre-tokenization system segments raw data into semantically meaningful byte chunks **before** entropy analysis. This provides deterministic structure that helps with downstream processing. The framework prioritizes pure-Rust implementations to avoid system dependencies.
 
 ### Core Trait
 
@@ -155,35 +155,57 @@ pub struct ByteSegment {
 }
 ```
 
-### Text Pre-Tokenizer
+### Automatic Format Detection
 
 ```rust
-use blt_burn::pretokenize::{TextPreTokenizer, ModalityPreTokenizer};
+use blt_burn::pretokenize::detect_modality;
 
-// Simple whitespace tokenization
-let pretokenizer = TextPreTokenizer::new_simple()?;
-let segments = pretokenizer.pre_tokenize(b"Hello world")?;
-
-// From tokenizer file
-let pretokenizer = TextPreTokenizer::from_file("tokenizer.json")?;
+let data = std::fs::read("file.unknown")?;
+let pt_type = detect_modality(&data);
+let segments = pt_type.create()?.pre_tokenize(&data)?;
 ```
 
-### Image Pre-Tokenizer
+### Text Pre-Tokenizers
 
 ```rust
 use blt_burn::pretokenize::{PreTokenizerType, ModalityPreTokenizer};
 
-let pretokenizer = PreTokenizerType::Image {
-    patch_size: 196,  // 14x14 at 1 byte/pixel
-    stride: 196,
+// Raw UTF-8 bytes (BLT-style)
+let pretokenizer = PreTokenizerType::TextRaw.create()?;
+let segments = pretokenizer.pre_tokenize(b"Hello world")?;
+
+let pretokenizer = PreTokenizerType::TextFromFile {
+    path: "tokenizer.json".to_string(),
 }.create()?;
 
-let image_bytes = std::fs::read("image.raw")?;
+let pretokenizer = PreTokenizerType::TextSimple.create()?;
+```
+
+### Image Pre-Tokenizer
+
+Decodes JPEG/PNG to RGB pixels, creates patches with adaptive entropy-based merging:
+
+```rust
+let pretokenizer = PreTokenizerType::Image {
+    patch_size: 16,   // 16x16 pixels
+    stride: 16,       // Non-overlapping
+}.create()?;
+
+let image_bytes = std::fs::read("image.jpg")?;
 let patches = pretokenizer.pre_tokenize(&image_bytes)?;
-// Each patch is a ByteSegment with metadata
+
+// Patches include entropy metadata for adaptive processing
+for patch in patches {
+    if let Some(meta) = patch.metadata {
+        let entropy = meta.extra["local_entropy"].as_f64().unwrap();
+        // Low-entropy patches may have been merged
+    }
+}
 ```
 
 ### Audio Pre-Tokenizer
+
+Currently supports WAV decoding to PCM frames:
 
 ```rust
 let pretokenizer = PreTokenizerType::Audio {
@@ -191,21 +213,94 @@ let pretokenizer = PreTokenizerType::Audio {
     sample_rate: 16000,
 }.create()?;
 
-let audio = std::fs::read("audio.raw")?;
-let frames = pretokenizer.pre_tokenize(&audio)?;
+let wav_data = std::fs::read("audio.wav")?;
+let frames = pretokenizer.pre_tokenize(&wav_data)?;
 ```
+
+**Future**: Pure-Rust `symphonia` integration for MP3/OGG/MP4 support.
 
 ### Code Pre-Tokenizer
 
+AST-aware segmentation using tree-sitter:
+
 ```rust
 let pretokenizer = PreTokenizerType::Code {
-    language: "rust".to_string(),
+    language: "rust".to_string(),  // or "python"
 }.create()?;
 
 let code = std::fs::read("main.rs")?;
-let lines = pretokenizer.pre_tokenize(&code)?;
-// Currently line-based; tree-sitter integration planned
+let segments = pretokenizer.pre_tokenize(&code)?;
+
+// Segments are semantic units: functions, structs, classes
+for seg in segments {
+    println!("Found: {}", seg.label.unwrap()); // e.g., "function_item"
+}
 ```
+
+### Planned Pre-Tokenizers (Stubs Available)
+
+#### PDF Pre-Tokenizer
+```rust
+// Requires: pdf = "0.9" in Cargo.toml
+let pretokenizer = PreTokenizerType::Pdf { 
+    extract_text: true 
+}.create()?;
+// Currently returns error, implement with pdf crate
+```
+
+#### Video Pre-Tokenizer
+```rust
+let pretokenizer = PreTokenizerType::Video { 
+    frame_rate: 30 
+}.create()?;
+
+// FFmpeg is detected at runtime with user-controlled installation
+// Full video frame extraction with comprehensive codec support
+```
+
+**FFmpeg Integration**:
+- **User-Controlled**: Interactive prompts in CLI with options to install, skip, or retry
+- **Non-Interactive Mode**: `--auto-install-ffmpeg` flag for CI/Docker environments
+- **Full Codec Support**: All major video codecs supported via FFmpeg
+
+**Supported Codecs (via FFmpeg/video-rs)**:
+- H.264 (all profiles: Baseline, Main, High)
+- H.265/HEVC
+- VP8, VP9
+- AV1
+- MPEG-4, MPEG-2
+- And many more formats
+
+**Installation**:
+FFmpeg installation is handled interactively when running the `ingest` binary:
+- Interactive prompts to install, skip, or retry
+- Use `--auto-install-ffmpeg` for non-interactive environments
+- Use `--no-audio-video` to disable video/audio support entirely
+- The installation script supports:
+  - macOS (Homebrew)
+  - Ubuntu/Debian (apt)
+  - Fedora/RHEL/CentOS (dnf)
+  - Arch/Manjaro (pacman)
+  - Windows (winget or manual)
+
+#### Binary Pre-Tokenizer
+```rust
+// Requires: goblin = "0.8" in Cargo.toml
+let pretokenizer = PreTokenizerType::Binary.create()?;
+// Parses ELF sections, PE segments, etc.
+```
+
+### Pure-Rust Philosophy
+
+To maintain portability and ease of deployment, BLT-Burn prioritizes pure-Rust implementations:
+
+- **Images**: `image` crate (JPEG, PNG, GIF, BMP, etc.)
+- **Audio**: `hound` for WAV, planned `symphonia` for MP3/OGG/MP4
+- **Documents**: `pdf` crate for PDF parsing
+- **Binaries**: `goblin` for ELF/PE/Mach-O analysis
+- **Code**: `tree-sitter` with language bindings
+
+This approach minimizes system dependencies where possible. FFmpeg is required for video processing and can be installed interactively when needed.
 
 ---
 
@@ -239,21 +334,25 @@ let model = config.init::<Wgpu>(&device);
 
 ### Model Output Structure
 
-**Critical for sphere integration:**
+**Critical for downstream processing:**
 
 ```rust
 pub struct ModelOutput<B: Backend> {
-    pub logits: Tensor<B, 3>,              // [batch, seq_len, vocab]
-    pub pre_norm_embeddings: Tensor<B, 3>, // [batch, seq_len, dim] - PRE L2 norm
-    pub embedding_norms: Tensor<B, 2>,     // [batch, seq_len] - PROMINENCE
+    pub logits: Tensor<B, 3>,                    // [batch, seq_len, vocab]
+    pub pre_norm_embeddings: Tensor<B, 3>,       // [batch, seq_len, dim] - PRE L2 norm
+    pub embedding_norms: Tensor<B, 2>,           // [batch, seq_len] - PROMINENCE
+    pub entropies: Option<Tensor<B, 2>>,         // [batch, seq_len] - ENTROPY
+    pub coherence_scores: Option<Tensor<B, 2>>,  // [batch, seq_len] - COHERENCE
 }
 ```
 
 **Why pre-norm embeddings matter:**
 
-- Post-norm embeddings have uniform L2 norm (≈1.0), losing signal
-- Pre-norm embeddings preserve magnitude variance (17.5 to 1e13 observed)
-- `embedding_norms` provides the "prominence" signal for water-filling
+- Post-norm embeddings have uniform L2 norm (≈1.0), losing variance
+- Pre-norm embeddings preserve natural magnitude differences
+- `embedding_norms` provides the prominence signal for downstream processing
+- `entropies` captures model uncertainty at each position
+- `coherence_scores` (pre_norm² / entropy) enables advanced allocation strategies
 
 ### Forward Pass
 
@@ -261,9 +360,8 @@ pub struct ModelOutput<B: Backend> {
 let tokens = Tensor::<Wgpu, 2, Int>::from_data([[1, 76, 105, 112, 112, 115]], &device);
 let output = model.forward_with_embeddings(tokens);
 
-// Extract for sphere processing
-let embeddings = output.pre_norm_embeddings;  // DON'T use post-norm!
-let prominence = output.embedding_norms;      // Water-filling input
+let embeddings = output.pre_norm_embeddings;  // [1, seq_len, 768]
+let prominence = output.embedding_norms;       // [1, seq_len]
 ```
 
 ---
@@ -322,20 +420,129 @@ for item in dataset.iter().take(100) {
 }
 ```
 
+### Handling Large Multimodal Datasets (e.g., MINT-1T)
+
+For massive datasets like MINT-1T (1 trillion tokens, mixed modalities), use Burn's dataset transforms:
+
+```rust
+use burn::data::dataset::transform::{
+    ComposedDataset, PartialDataset, SamplerDataset, 
+    WindowsDataset, ShuffledDataset
+};
+
+// Assume MINT-1T loaded from Parquet
+struct Mint1TDataset { /* ... */ }
+impl Dataset<MintItem> for Mint1TDataset { /* ... */ }
+
+// 1. Compose multiple shards
+let shard1 = Mint1TDataset::new("mint-1t-shard-001.parquet");
+let shard2 = Mint1TDataset::new("mint-1t-shard-002.parquet");
+let composed = ComposedDataset::new(vec![shard1, shard2]);
+
+// 2. Take a subset to avoid OOM
+let partial = PartialDataset::new(composed, 0..1_000_000);
+
+// 3. Sample for balanced modalities
+let sampled = SamplerDataset::new(partial, 10_000, true);
+
+// 4. Shuffle for training
+let shuffled = ShuffledDataset::new(sampled, 42);
+
+// 5. Process with automatic format detection
+for item in shuffled.iter() {
+    // Detect and process each field
+    if let Some(text) = item.text {
+        let pt_type = detect_modality(&text);
+        let segments = pt_type.create()?.pre_tokenize(&text)?;
+    }
+    if let Some(image) = item.image_bytes {
+        let pt_type = detect_modality(&image);
+        let segments = pt_type.create()?.pre_tokenize(&image)?;
+    }
+}
+```
+
+### Streaming Large Files
+
+For files too large to fit in memory:
+
+```rust
+use std::io::{BufReader, Read};
+
+fn process_large_file(path: &str) -> Result<()> {
+    let file = std::fs::File::open(path)?;
+    let mut reader = BufReader::new(file);
+    let mut buffer = vec![0u8; 1024 * 1024]; // 1MB chunks
+    
+    while let Ok(n) = reader.read(&mut buffer) {
+        if n == 0 { break; }
+        
+        let chunk = &buffer[..n];
+        let pt_type = detect_modality(chunk);
+        match pt_type.create()?.pre_tokenize(chunk) {
+            Ok(segments) => process_segments(segments),
+            Err(_) => continue, // Skip unparseable chunks
+        }
+    }
+    Ok(())
+}
+```
+
 ---
 
-## Water-Filling Integration
+## Output Format
 
-### Output Format
+### Tensor Data (`.safetensors`)
 
-The `ingest` binary produces `.safetensors` files with:
+Header: Contains `metadata_file` key pointing to the SQLite sidecar.
 
+Tensors:
 ```python
 {
     "embeddings": [batch, seq_len, 768],      # Pre-norm!
     "prominence": [batch, seq_len],           # L2 norms
+    "entropies": [batch, seq_len],            # Shannon entropy
+    "coherence_scores": [batch, seq_len],     # pre_norm² / entropy
     "patch_indices": [num_patches],           # Start positions
     "patch_mask": [batch, seq_len],           # Binary mask
+}
+```
+
+### Hypergraph Sidecar (`.hypergraph.db`)
+
+SQLite database with bincode-serialized nodes and edges
+
+Compact, random-access friendly storage
+
+JAX sharding support for distributed processing
+
+Schema:
+```sql
+CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE nodes (id INTEGER PRIMARY KEY, data BLOB NOT NULL);
+CREATE TABLE hyperedges (id INTEGER PRIMARY KEY, vertices BLOB NOT NULL, data BLOB NOT NULL);
+```
+
+Export to JSON for debugging with `--export-json` flag
+
+Format (when exported as JSON):
+```json
+{
+  "nodes": [
+    { "Trunk": { "source_hash": "...", "total_bytes": 1024 } },
+    { "Branch": { "label": "video_stream", "modality": "video" } },
+    { "Leaf": { "bytes": [], "label": "frame_0", "metadata": { ... } } }
+  ],
+  "edges": [
+    { "label": "contains", "weight": 1.0 },
+    { "label": "next", "weight": 1.0 }
+  ],
+  "topology": {
+    "edges": [
+      [0, [0, 1]], // Edge 0 connects Node 0 -> Node 1
+      [1, [1, 2]]  // Edge 1 connects Node 1 -> Node 2
+    ]
+  }
 }
 ```
 
@@ -343,29 +550,96 @@ The `ingest` binary produces `.safetensors` files with:
 
 ```python
 import numpy as np
+import json
+from pathlib import Path
 from safetensors.numpy import load_file
 
-# Load BLT output
-data = load_file("ingest_output/item_0.safetensors")
+# 1. Load Tensor Data
+tensor_path = Path("ingest_output/item_0.safetensors")
+data = load_file(tensor_path)
 embeddings = data["embeddings"]    # Pre-norm embeddings
-prominence = data["prominence"]    # For water-filling
+prominence = data["prominence"]    # For processing
 
-# Apply water-filling (osmotic or THRML)
-from water_filling_integration import osmotic_water_filling
-sphere_coords, radii, shells = osmotic_water_filling(
-    embeddings=embeddings,
-    prominence_scores=prominence,
-    target_shells=512,
-    capacity_exponent=1.5
-)
+# 2. Load Hypergraph Sidecar
+# From SQLite (primary format)
+import sqlite3
+meta_filename = tensor_path.with_suffix(".hypergraph.db")
+conn = sqlite3.connect(meta_filename)
+# ... query nodes and edges ...
 
-# Save sphere results
-np.savez("sphere_results/item_0.npz",
-    sphere_coords=sphere_coords,
-    radii=radii,
-    shells=shells,
+# Or from JSON (if exported)
+meta_filename = tensor_path.with_suffix(".hypergraph.json")
+with open(meta_filename, 'r') as f:
+    hypergraph = json.load(f)
+
+nodes = hypergraph['nodes']
+# Find Trunk/Branch info
+trunk = next(n['Trunk'] for n in nodes if 'Trunk' in n)
+print(f"Processing {trunk['source_hash']} content")
+
+# 3. Process embeddings (e.g., normalize, cluster, etc.)
+# Apply your application-specific logic here
+processed_embeddings = your_processing_function(embeddings, prominence)
+
+# Save results
+np.savez("processed_results/item_0.npz",
+    processed_embeddings=processed_embeddings,
     original_prominence=prominence
 )
+```
+
+### JAX Distributed Loading
+
+BLT-Burn supports automatic sharding for JAX distributed processing:
+
+```bash
+# Generate sharded output (auto-shards if >100k tokens)
+cargo run --bin ingest -- \
+    --text "Your large text here..." \
+    --output output/ \
+    --num-shards 4
+
+# Or control shard size
+cargo run --bin ingest -- \
+    --text "Your text..." \
+    --output output/ \
+    --shard-size 50000  # 50k tokens per shard
+```
+
+This generates:
+- `output/manual_input_shard_0_of_4.safetensors`
+- `output/manual_input_shard_1_of_4.safetensors`
+- etc.
+
+Each shard includes sharding metadata:
+```json
+{
+  "sharding_info": {
+    "global_shape": [1, 200000, 768],
+    "shard_index": 0,
+    "num_shards": 4,
+    "process_index": 0,
+    "axis": 1
+  }
+}
+```
+
+Load in JAX:
+```python
+from scripts.blt_loader import load_sharded_blt_output_jax
+
+# Automatic JAX distributed loading
+data = load_sharded_blt_output_jax(
+    prefix="output/manual_input",
+    # process_index and num_processes default to JAX values
+)
+
+# Access sharded arrays
+embeddings = data['embeddings']  # Sharded JAX array
+prominence = data['prominence']  # Sharded JAX array
+
+# Apply distributed processing
+processed = your_distributed_function(embeddings, prominence)
 ```
 
 ---
@@ -406,7 +680,7 @@ fn main() -> anyhow::Result<()> {
         .reshape([1, tokens.len()]);
     let output = model.forward_with_embeddings(input);
     
-    // Extract for sphere
+    // Extract for processing
     let embeddings = output.pre_norm_embeddings;  // [1, seq_len, 768]
     let prominence = output.embedding_norms;       // [1, seq_len]
     
@@ -465,31 +739,66 @@ fn process_image(image_path: &str) -> anyhow::Result<()> {
 
 ### Entropy Thresholds
 
-| Use Case | Threshold | Notes |
-|----------|-----------|-------|
-| Standard text | 1.35 | Default for FineWeb-Edu |
-| Code | 1.5-2.0 | Higher for more granular patches |
-| Noisy data | 1.0-1.2 | Lower for more boundaries |
+The entropy threshold controls patch boundary detection:
 
-### Water-Filling Parameters
+- **1.35**: Default value from the original BLT paper and Meta's implementation
+- **1.55**: Produces larger chunks, which may be preferable for some use cases
+- The `--threshold` parameter in the ingest binary allows experimentation
 
-| Parameter | Range | Recommended |
-|-----------|-------|-------------|
-| `target_shells` | 64-512 | 128-256 for most cases |
-| `capacity_exponent` | 1.0-2.0 | 1.5 (empirically optimal) |
-| `min_radius` | 32-128 | 64.0 |
-| `max_radius` | 512-2048 | 1024.0 |
+#### Threshold Tuning Script
+
+Use `scripts/tune_entropy_threshold.py` to find optimal thresholds for your data:
+
+```bash
+# Test different thresholds on various modalities
+python scripts/tune_entropy_threshold.py \
+    --text sample.txt \
+    --image sample.jpg \
+    --code sample.rs \
+    --thresholds "1.0,1.2,1.35,1.5,1.55,1.7,2.0" \
+    --output results.json
+```
+
+The script provides:
+- Detailed patch size distribution across buckets (1-3, 4-10, 11-24, etc.)
+- Percentile analysis (P50, P90, P99)
+- Visual distribution charts
+- Recommended threshold per modality based on target mean patch size
+- Warnings for distributions with too many tiny (<10 tokens) or huge (>1024 tokens) patches
+
+Example output:
+```
+TEXT: sample.txt
+Threshold | Patches | Mean Size | P50  | P90  | P99  | Max | Most Common Bucket
+----------------------------------------------------------------------------------
+    1.35 |      42 |     127.3 |  98 |  203 |  412 |  523 | 49-100 (35%)
+    1.55 |      31 |     172.1 | 134 |  287 |  501 |  612 | 101-256 (42%)
+
+Size distribution:
+  1-3      : ██                    2 patches ( 6.5%)
+  4-10     : ███                   3 patches ( 9.7%)
+  11-24    : ████                  4 patches (12.9%)
+  25-48    : ██████                6 patches (19.4%)
+  49-100   : █████                 5 patches (16.1%)
+  101-256  : █████████████        13 patches (41.9%)
+  257-512  : ██                    2 patches ( 6.5%)
+
+Recommended threshold: 1.35 (Mean size 127.3 closest to target 128)
+```
+
+### Integration Parameters
+
+The specific parameters for downstream processing (e.g., clustering, dimensionality reduction) depend on your application and should be tuned based on your specific use case.
 
 ---
 
-## Integration Checklist for Sphere Development
+## Integration Checklist
 
 - [ ] Consume `.safetensors` files from `ingest_output/`
 - [ ] Use `embeddings` field (pre-norm, **not** post-norm)
-- [ ] Use `prominence` field for water-filling prominence scores
+- [ ] Use `prominence` field for signal strength
 - [ ] Respect `patch_indices` for semantic boundaries
-- [ ] Output `.npz` files with `sphere_coords`, `radii`, `shells`
-- [ ] Maintain `original_prominence` for analysis
+- [ ] Load hypergraph sidecar for structural metadata
 - [ ] Support multimodal inputs via `pretokenize` module
 
 ---
@@ -505,7 +814,7 @@ cargo run --bin ingest  # Uses cached model
 ```
 
 **Repository**: `SashimiSaketoro/entropy_burn`  
-**File**: `blt_entropy_model.mpk` (190MB, bf16 precision)
+**File**: `blt_entropy_model.mpk` (bf16 weights)
 
 ### Manual Download
 
@@ -521,23 +830,21 @@ hf_hub_download(
 
 ---
 
-## Performance Notes
+## Performance Considerations
 
-- **Batch Processing**: Process in chunks of 1024 tokens for optimal GPU utilization
-- **Memory**: ~2GB VRAM for inference, ~4GB for training
-- **Throughput**: ~100-200 tokens/sec on M1 Mac, ~500-1000 on NVIDIA GPUs
-- **Pre-tokenization**: Adds <5% overhead, enables better sphere organization
+- **Batch Processing**: Larger batches generally improve GPU utilization
+- **Memory Usage**: Depends on sequence length and batch size
+- **Pre-tokenization**: Minimal overhead compared to model inference
 
 ---
 
 ## Further Reading
 
 - [Pre-L2-Norm Signal Extraction](./PRENORM_SIGNAL_SUMMARY.md)
-- [Water-Filling Integration](../scripts/water_filling_integration.py)
 - [Rust Burn Book](https://burn.dev/book/)
 
 ---
 
-**Last Updated**: 2025-11-19  
-**Version**: 0.1.0  
+**Last Updated**: 2025-11-21  
+**Version**: 0.3.0  
 **Maintainer**: BLT-Burn Contributors
