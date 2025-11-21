@@ -2,7 +2,7 @@
 
 > **Partial Rust implementation of ByteLatent Transformer (BLT) entropy model with Burn framework, specifically designed for hypersphere embedding pipelines.**
 
-⚠️ **Note**: This is NOT a complete port of the original BLT repository. This implementation focuses specifically on entropy-based text segmentation and pre-norm signal extraction for hypersphere embeddings. Many features from the original BLT are intentionally omitted.
+⚠️ **Note**: This is NOT a complete port of the original BLT repository. This implementation focuses specifically on entropy-based text segmentation and pre-norm signal extraction for hypersphere embeddings. Many features from the original BLT are intentionally omitted. I am currently knowledge gating this by relying on YOU to gain access to the Facebook/blt/entropy_model and convert it to the burn preffered [.mpk]. I did not include conversion scripts to play nice with neoZuck. 
 
 [![License](https://img.shields.io/badge/License-CC%20BY--NC%204.0-lightgrey.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.70+-orange.svg)](https://www.rust-lang.org/)
@@ -131,7 +131,6 @@ cargo run --bin ingest
 - ✅ **Multimodal Support** - Text, images, audio, code pre-tokenization
 - ✅ **Pure-Rust Approach** - No system dependencies for core functionality
 - ✅ **GPU Acceleration** - Automatic acceleration via WGPU
-- ✅ **bf16 Weights** - Half-precision model weights
 - ✅ **FineWeb-Edu Integration** - Built-in dataset utilities
 - ✅ **Water-Filling Ready** - Output format optimized for hypersphere pipelines
 - ✅ **Hypergraph Sidecar** - SQLite-based storage with explicit Trunk-Branch-Leaf topology alongside tensors
@@ -316,5 +315,6 @@ Three functions you probably care about most:
   _Auto-detect content type (Image, Audio, Video, Code) from magic bytes._
 
 **Version**: 0.2.0  
-**Last Updated**: 2025-11-20
+**Last Updated**: 2025-11-21
+
 
