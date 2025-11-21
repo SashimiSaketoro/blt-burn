@@ -258,13 +258,13 @@ let pretokenizer = PreTokenizerType::Video {
     frame_rate: 30 
 }.create()?;
 
-// FFmpeg is required and automatically installed during build if missing
+// FFmpeg is detected at runtime with user-controlled installation
 // Full video frame extraction with comprehensive codec support
 ```
 
 **FFmpeg Integration**:
-- **Automatic Installation**: FFmpeg is detected and installed automatically during build if missing
-- **No User Interaction**: Installation happens transparently - no prompts required
+- **User-Controlled**: Interactive prompts in CLI with options to install, skip, or retry
+- **Non-Interactive Mode**: `--auto-install-ffmpeg` flag for CI/Docker environments
 - **Full Codec Support**: All major video codecs supported via FFmpeg
 
 **Supported Codecs (via FFmpeg/video-rs)**:
@@ -276,13 +276,16 @@ let pretokenizer = PreTokenizerType::Video {
 - And many more formats
 
 **Installation**:
-FFmpeg is automatically installed during `cargo build` if not found on your system.
-The installation script supports:
-- macOS (Homebrew)
-- Ubuntu/Debian (apt)
-- Fedora/RHEL/CentOS (dnf)
-- Arch/Manjaro (pacman)
-- Windows (winget or manual)
+FFmpeg installation is handled interactively when running the `ingest` binary:
+- Interactive prompts to install, skip, or retry
+- Use `--auto-install-ffmpeg` for non-interactive environments
+- Use `--no-audio-video` to disable video/audio support entirely
+- The installation script supports:
+  - macOS (Homebrew)
+  - Ubuntu/Debian (apt)
+  - Fedora/RHEL/CentOS (dnf)
+  - Arch/Manjaro (pacman)
+  - Windows (winget or manual)
 
 #### Binary Pre-Tokenizer
 ```rust
@@ -301,7 +304,7 @@ To maintain portability and ease of deployment, BLT-Burn prioritizes pure-Rust i
 - **Binaries**: `goblin` for ELF/PE/Mach-O analysis
 - **Code**: `tree-sitter` with language bindings
 
-This approach minimizes system dependencies where possible. FFmpeg is required for video processing and is automatically installed during build if missing.
+This approach minimizes system dependencies where possible. FFmpeg is required for video processing and can be installed interactively when needed.
 
 ---
 
@@ -339,17 +342,21 @@ let model = config.init::<Wgpu>(&device);
 
 ```rust
 pub struct ModelOutput<B: Backend> {
-    pub logits: Tensor<B, 3>,              // [batch, seq_len, vocab]
-    pub pre_norm_embeddings: Tensor<B, 3>, // [batch, seq_len, dim] - PRE L2 norm
-    pub embedding_norms: Tensor<B, 2>,     // [batch, seq_len] - PROMINENCE
+    pub logits: Tensor<B, 3>,                    // [batch, seq_len, vocab]
+    pub pre_norm_embeddings: Tensor<B, 3>,       // [batch, seq_len, dim] - PRE L2 norm
+    pub embedding_norms: Tensor<B, 2>,           // [batch, seq_len] - PROMINENCE
+    pub entropies: Option<Tensor<B, 2>>,         // [batch, seq_len] - ENTROPY
+    pub coherence_scores: Option<Tensor<B, 2>>,  // [batch, seq_len] - COHERENCE
 }
 ```
 
 **Why pre-norm embeddings matter:**
 
-- Post-norm embeddings have uniform L2 norm (≈1.0), losing signal
-- Pre-norm embeddings preserve magnitude variance (17.5 to 1e13 observed)
-- `embedding_norms` provides the "prominence" signal for water-filling
+- Post-norm embeddings have uniform L2 norm (≈1.0), losing variance
+- Pre-norm embeddings preserve natural magnitude differences
+- `embedding_norms` provides the prominence signal for downstream processing
+- `entropies` captures model uncertainty at each position
+- `coherence_scores` (pre_norm² / entropy) enables Orch-OR quantum allocation
 
 ### Forward Pass
 
@@ -393,6 +400,61 @@ let mask = patch_start_mask_from_entropy_with_monotonicity(
 
 let patch_indices = patch_start_indices_cpu(mask);
 // patch_indices[0] = [0, 15, 42, 87, ...]  // Start positions
+```
+
+---
+
+## Orch-OR Quantum Coherence Mode
+
+### Overview
+
+The Orch-OR (Orchestrated Objective Reduction) mode implements a Penrose-Hameroff inspired allocation strategy where hypersphere volume is distributed proportional to "proto-conscious moments":
+
+```
+allocation ∝ pre_norm² × exp(-entropy / T)
+```
+
+This biases retrieval toward patches with high coherence (low entropy) AND high prominence (large pre-norm), representing the model's most significant "aha" moments.
+
+### Usage
+
+```bash
+# Run ingestion (automatically exports entropy and coherence)
+cargo run --release --bin ingest -- --file input.txt --output-dir output/
+
+# Apply Orch-OR water-filling
+python scripts/water_filling_integration.py \
+    --input output/ \
+    --orch-or \
+    --orch-or-temperature 1e-5
+```
+
+### Testing
+
+```bash
+# Validate implementation
+python scripts/test_orch_or.py --input output/item_0.safetensors
+
+# Temperature sweep to find optimal T
+python scripts/test_orch_or.py --input output/item_0.safetensors --temperature 1e-6
+```
+
+### Parameters
+
+- `--orch-or`: Enable Orch-OR mode (flag)
+- `--orch-or-temperature`: Planck temperature T (default: 1e-5)
+  - Lower T (1e-6): Sharper bias toward low-entropy patches
+  - Higher T (1e-4): Softer bias, more classical behavior
+
+### Theory
+
+Maps Penrose-Hameroff quantum consciousness to embedding geometry:
+- **Superposition size**: pre_norm (how "big" the quantum state is)
+- **Objective reduction**: entropy spike (when coherence collapses)
+- **Conscious volume**: sphere allocation (how much "reality" this patch gets)
+
+High-coherence patches dominate the hypersphere center, while confused/noisy regions compress to poles.
+
 ```
 
 **Monotonicity constraint**: Prevents backwards jumps, enforcing left-to-right patch growth.
@@ -495,22 +557,29 @@ fn process_large_file(path: &str) -> Result<()> {
 The `ingest` binary produces matched pairs of files for every input item:
 
 1. **Tensor Data (`.safetensors`)**:
-   - Header: Contains `metadata_file` key pointing to the JSON sidecar.
+   - Header: Contains `metadata_file` key pointing to the SQLite sidecar.
    - Tensors:
-     ```python
-     {
-         "embeddings": [batch, seq_len, 768],      # Pre-norm!
-         "prominence": [batch, seq_len],           # L2 norms
-         "patch_indices": [num_patches],           # Start positions
-         "patch_mask": [batch, seq_len],           # Binary mask
-     }
-     ```
+```python
+{
+    "embeddings": [batch, seq_len, 768],      # Pre-norm!
+    "prominence": [batch, seq_len],           # L2 norms
+    "patch_indices": [num_patches],           # Start positions
+    "patch_mask": [batch, seq_len],           # Binary mask
+}
+```
 
-2. **Hypergraph Sidecar (`.hypergraph.json`)**:
-   - Replaces the old linear `.metadata.json`.
-   - Contains rich semantic information structured as a Directed Hypergraph.
-   - Implements **Skeleton (Topology) + Flesh (Data)** architecture.
-   - Format:
+2. **Hypergraph Sidecar (`.hypergraph.db`)**:
+   - SQLite database with bincode-serialized nodes and edges
+   - Compact, random-access friendly storage
+   - JAX sharding support for distributed processing
+   - Schema:
+     ```sql
+     CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+     CREATE TABLE nodes (id INTEGER PRIMARY KEY, data BLOB NOT NULL);
+     CREATE TABLE hyperedges (id INTEGER PRIMARY KEY, vertices BLOB NOT NULL, data BLOB NOT NULL);
+     ```
+   - Export to JSON for debugging with `--export-json` flag
+   - Format (when exported as JSON):
      ```json
      {
        "nodes": [
@@ -524,8 +593,8 @@ The `ingest` binary produces matched pairs of files for every input item:
        ],
        "topology": {
          "edges": [
-           [0, [0, 1]], // Edge 0 connects Node 0 (Trunk) -> Node 1 (Branch)
-           [0, [1, 2]]  // Edge 0 (contains) connects Node 1 -> Node 2 (Leaf)
+           [0, [0, 1]], // Edge 0 connects Node 0 -> Node 1
+           [1, [1, 2]]  // Edge 1 connects Node 1 -> Node 2
          ]
        }
      }
@@ -546,6 +615,13 @@ embeddings = data["embeddings"]    # Pre-norm embeddings
 prominence = data["prominence"]    # For water-filling
 
 # 2. Load Hypergraph Sidecar
+# From SQLite (primary format)
+import sqlite3
+meta_filename = tensor_path.with_suffix(".hypergraph.db")
+conn = sqlite3.connect(meta_filename)
+# ... query nodes and edges ...
+
+# Or from JSON (if exported)
 meta_filename = tensor_path.with_suffix(".hypergraph.json")
 with open(meta_filename, 'r') as f:
     hypergraph = json.load(f)
@@ -571,6 +647,60 @@ np.savez("sphere_results/item_0.npz",
     shells=shells,
     original_prominence=prominence
 )
+```
+
+### JAX Distributed Loading
+
+BLT-Burn supports automatic sharding for JAX distributed processing:
+
+```bash
+# Generate sharded output (auto-shards if >100k tokens)
+cargo run --bin ingest -- \
+    --text "Your large text here..." \
+    --output output/ \
+    --num-shards 4
+
+# Or control shard size
+cargo run --bin ingest -- \
+    --text "Your text..." \
+    --output output/ \
+    --shard-size 50000  # 50k tokens per shard
+```
+
+This generates:
+- `output/manual_input_shard_0_of_4.safetensors`
+- `output/manual_input_shard_1_of_4.safetensors`
+- etc.
+
+Each shard includes sharding metadata:
+```json
+{
+  "sharding_info": {
+    "global_shape": [1, 200000, 768],
+    "shard_index": 0,
+    "num_shards": 4,
+    "process_index": 0,
+    "axis": 1
+  }
+}
+```
+
+Load in JAX:
+```python
+from scripts.water_filling_integration import load_sharded_blt_output_jax
+
+# Automatic JAX distributed loading
+data = load_sharded_blt_output_jax(
+    prefix="output/manual_input",
+    # process_index and num_processes default to JAX values
+)
+
+# Access sharded arrays
+embeddings = data['embeddings']  # Sharded JAX array
+prominence = data['prominence']  # Sharded JAX array
+
+# Apply distributed water-filling
+sphere_coords = distributed_water_filling(embeddings, prominence)
 ```
 
 ---
@@ -670,20 +800,56 @@ fn process_image(image_path: &str) -> anyhow::Result<()> {
 
 ### Entropy Thresholds
 
-| Use Case | Threshold | Notes |
-|----------|-----------|-------|
-| Standard text | 1.35 | Default for FineWeb-Edu |
-| Code | 1.5-2.0 | Higher for more granular patches |
-| Noisy data | 1.0-1.2 | Lower for more boundaries |
+The entropy threshold controls patch boundary detection:
 
-### Water-Filling Parameters
+- **1.35**: Default value from the original BLT paper and Meta's implementation
+- **1.55**: Produces larger chunks, which may be preferable for some use cases
+- The `--threshold` parameter in the ingest binary allows experimentation
 
-| Parameter | Range | Recommended |
-|-----------|-------|-------------|
-| `target_shells` | 64-512 | 128-256 for most cases |
-| `capacity_exponent` | 1.0-2.0 | 1.5 (empirically optimal) |
-| `min_radius` | 10.0-64.0 | 32.0 (Hollow Core size) |
-| `max_radius` | Unbounded | Determined by prominence |
+#### Threshold Tuning Script
+
+Use `scripts/tune_entropy_threshold.py` to find optimal thresholds for your data:
+
+```bash
+# Test different thresholds on various modalities
+python scripts/tune_entropy_threshold.py \
+    --text sample.txt \
+    --image sample.jpg \
+    --code sample.rs \
+    --thresholds "1.0,1.2,1.35,1.5,1.55,1.7,2.0" \
+    --output results.json
+```
+
+The script provides:
+- Detailed patch size distribution across buckets (1-3, 4-10, 11-24, etc.)
+- Percentile analysis (P50, P90, P99)
+- Visual distribution charts
+- Recommended threshold per modality based on target mean patch size
+- Warnings for distributions with too many tiny (<10 tokens) or huge (>1024 tokens) patches
+
+Example output:
+```
+TEXT: sample.txt
+Threshold | Patches | Mean Size | P50  | P90  | P99  | Max | Most Common Bucket
+----------------------------------------------------------------------------------
+    1.35 |      42 |     127.3 |  98 |  203 |  412 |  523 | 49-100 (35%)
+    1.55 |      31 |     172.1 | 134 |  287 |  501 |  612 | 101-256 (42%)
+
+Size distribution:
+  1-3      : ██                    2 patches ( 6.5%)
+  4-10     : ███                   3 patches ( 9.7%)
+  11-24    : ████                  4 patches (12.9%)
+  25-48    : ██████                6 patches (19.4%)
+  49-100   : █████                 5 patches (16.1%)
+  101-256  : █████████████        13 patches (41.9%)
+  257-512  : ██                    2 patches ( 6.5%)
+
+Recommended threshold: 1.35 (Mean size 127.3 closest to target 128)
+```
+
+### Integration Parameters
+
+The specific parameters for hypersphere organization (shells, radii, etc.) depend on your downstream processing pipeline and should be tuned based on your specific use case.
 
 ---
 
@@ -710,7 +876,7 @@ cargo run --bin ingest  # Uses cached model
 ```
 
 **Repository**: `SashimiSaketoro/entropy_burn`  
-**File**: `blt_entropy_model.mpk` (190MB, bf16 precision)
+**File**: `blt_entropy_model.mpk` (bf16 weights)
 
 ### Manual Download
 
@@ -726,12 +892,11 @@ hf_hub_download(
 
 ---
 
-## Performance Notes
+## Performance Considerations
 
-- **Batch Processing**: Process in chunks of 1024 tokens for optimal GPU utilization
-- **Memory**: ~2GB VRAM for inference, ~4GB for training
-- **Throughput**: ~100-200 tokens/sec on M1 Mac, ~500-1000 on NVIDIA GPUs
-- **Pre-tokenization**: Adds <5% overhead, enables better sphere organization
+- **Batch Processing**: Larger batches generally improve GPU utilization
+- **Memory Usage**: Depends on sequence length and batch size
+- **Pre-tokenization**: Minimal overhead compared to model inference
 
 ---
 
@@ -744,5 +909,5 @@ hf_hub_download(
 ---
 
 **Last Updated**: 2025-11-20  
-**Version**: 0.1.0  
+**Version**: 0.2.0  
 **Maintainer**: BLT-Burn Contributors

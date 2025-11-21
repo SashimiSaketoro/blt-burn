@@ -50,26 +50,15 @@ When we normalize embeddings to unit length for hypersphere placement, we tradit
 
 ## Why Pre-Norm Has More Signal
 
-### Demonstration with Synthetic Data
+### Key Insight
 
-```python
-# Pre-norm embeddings (natural variance)
-Raw L2 Norms: [0.82, 1.45, 0.91, 2.13, 0.77, 1.88, ...]
-   mean = 1.24, std = 0.48  ← HIGH VARIANCE = RICH SIGNAL
+Pre-norm embeddings preserve the natural variance in L2 magnitudes, while post-norm embeddings are all normalized to unit length (L2 = 1.0). This variance is crucial for:
 
-# Post-norm embeddings (L2 normalized)  
-Normalized L2 Norms: [1.00, 1.00, 1.00, 1.00, 1.00, 1.00, ...]
-   mean = 1.00, std = 0.00  ← NO VARIANCE = NO SIGNAL
-```
+- **Prominence detection** - Higher L2 norms indicate more prominent/important tokens
+- **Density estimation** - L2 magnitude correlates with information density
+- **Outlier detection** - Extreme L2 values mark special tokens or boundaries
 
-### Information Content Comparison
-
-| Metric | Pre-Norm | Post-Norm | Signal Ratio |
-|--------|----------|-----------|--------------|
-| **Std Dev** | 0.48 | ~0.00 | **∞x more** |
-| **Dynamic Range** | 1.36 | ~0.00 | **∞x more** |
-| **Outliers (>1σ)** | 16.2% | ~0% | **All lost** |
-| **Prominence Detection** | ✅ Works | ❌ Impossible | - |
+After L2 normalization, all embeddings have identical magnitude, making these distinctions impossible.
 
 ## Integration with Water-Filling Algorithms
 
@@ -91,8 +80,6 @@ Low L2 Norm  → Low Pressure  → Demotes to Inner Shells
    - Radial promotion (70%): move to outer shell
 5. Iterate until equilibrium
 
-**Topology Note (Hollow Core):**
-To prevent attention saturation at the center, we enforce a **Hollow Core** (minimum radius, e.g., R=32). No points exist in the core; the "mantle" begins at R=32 and expands outwards ("Infinite Crust") to accommodate high-prominence outliers.
 
 ### Method 2: THRML Energy-Based Water-Filling
 
@@ -158,56 +145,39 @@ impl<B: Backend> LMTransformer<B> {
 ### Python (Water-Filling Side)
 
 ```python
-def extract_and_optimize(text, model, params):
-    # 1. Get pre-norm embeddings
-    output = model.forward_with_embeddings(params, tokenize(text))
+def extract_and_optimize(safetensors_path):
+    # 1. Load pre-computed embeddings from BLT-Burn output
+    from safetensors.numpy import load_file
+    data = load_file(safetensors_path)
     
     # 2. Extract density signal
-    embeddings_raw = output.pre_norm_embeddings  # [N, dim]
-    prominence = output.embedding_norms          # [N]
+    embeddings_raw = data["embeddings"]    # [1, N, 768] - Pre-norm!
+    prominence = data["prominence"]        # [1, N] - L2 norms
     
-    # 3. Apply water-filling
+    # 3. Load hypergraph sidecar (v0.2+)
+    import sqlite3
+    db_path = safetensors_path.replace('.safetensors', '.hypergraph.db')
+    conn = sqlite3.connect(db_path)
+    # ... query semantic structure ...
+    
+    # 4. Apply water-filling
     radii, shells = osmotic_water_filling(
         embeddings_raw=embeddings_raw,
-        prominence=prominence
+        prominence_scores=prominence
     )
     
-    # 4. Place on hypersphere
-    directions = embeddings_raw / (prominence[:, None] + 1e-8)
-    hypersphere_coords = directions * radii[:, None]
+    # 5. Place on hypersphere
+    directions = embeddings_raw / (prominence[:, :, None] + 1e-8)
+    hypersphere_coords = directions * radii[:, :, None]
     
     return hypersphere_coords, shells
 ```
 
-## Empirical Results (Expected)
+## Implementation Status
 
-Based on TheSphere documentation and osmotic water-filling experiments:
+The pre-norm signal extraction is fully implemented in the BLT-Burn model. The water-filling algorithms in `scripts/water_filling_integration.py` demonstrate how to use this signal for hypersphere organization.
 
-### With Pre-Norm Signal (Proposed)
-```
-Shell Distribution:
-  Inner (0-32):   ████████ 25.2%
-  Mid (33-96):    ████████████████ 49.8% 
-  Outer (97-127): ████████ 25.0%
-  
-  ✅ Balanced osmotic flow
-  ✅ Prominence overflow detected
-  ✅ 70% fewer promotions (lateral traversal)
-  ✅ Converges in 12 iterations
-```
-
-### Without Pre-Norm Signal (Baseline)
-```
-Shell Distribution:
-  Inner (0-32):   ██ 8.3%
-  Mid (33-96):    ████████████████████████ 83.4%
-  Outer (97-127): ██ 8.3%
-  
-  ❌ All points look identical (L2=1.0)
-  ❌ No prominence signal
-  ❌ Random assignment
-  ❌ No convergence
-```
+The key architectural change is capturing embeddings **before** the final RMS normalization layer, preserving the L2 magnitude information that would otherwise be lost.
 
 ## Key Takeaways
 
@@ -217,11 +187,96 @@ Shell Distribution:
 4. **Works for both osmotic and THRML water-filling**
 5. **Critical for outlier/prominence detection**
 
-## References
+## Orch-OR Quantum Coherence Mode
 
-- [Water-Filling Integration](../scripts/water_filling_integration.py)
-- For TheSphere documentation, see the main TheSphere repository
+### The Penrose-Hameroff Connection
 
----
+The Orch-OR (Orchestrated Objective Reduction) theory proposes that consciousness emerges from quantum coherence in microtubules, with "aha moments" corresponding to gravitational self-collapse events. This maps remarkably well to our pre-norm signal extraction:
 
-**Bottom Line:** The L2 norm is not noise to be discarded—it's the **most valuable signal** for organizing embeddings on the hypersphere. Extract it before normalization and use it to drive intelligent water-filling optimization.
+| Biological Orch-OR | BLT-Burn / Hypersphere | Why It Maps |
+|-------------------|------------------------|-------------|
+| Superposition size (# coherent tubulins) | Pre-norm L2 norm (prominence) | Bigger superposition = deeper conscious moment = more spherical volume |
+| Objective Reduction (Planck threshold) | Entropy spike (patch boundary) | Entropy rise = model loses coherence = "collapse" event |
+| Post-collapse conscious volume | Water-filling power allocation | Larger superposition → richer experience → more bits/packing density |
+| Microtubule lattice geometry | Hypergraph topology | Quasi-periodic structure enabling coherence |
+
+### Implementation
+
+The Orch-OR mode uses the formula:
+
+```
+allocation ∝ pre_norm² × exp(-entropy / T)
+```
+
+Where:
+- `pre_norm²`: Gravitational self-energy (∝ mass²)
+- `exp(-entropy/T)`: Quantum decoherence rate
+- `T`: "Planck temperature" hyperparameter (default: 1e-5)
+
+This biases the hypersphere toward patches with:
+- **High coherence** (low entropy) - the model is confident
+- **High prominence** (large pre-norm) - the representation is significant
+
+Together, these represent the "brightest" moments - patches that deserve maximum "conscious volume" on the sphere.
+
+### Usage
+
+```bash
+# Run ingestion (exports entropy and coherence)
+cargo run --release --bin ingest -- --file input.txt --output-dir output/
+
+# Apply Orch-OR water-filling
+python scripts/water_filling_integration.py \
+    --input output/ \
+    --orch-or \
+    --orch-or-temperature 1e-5
+```
+
+#### Workflow Recap
+
+1. **Ingest** with the updated Rust pipeline to populate `entropies` and `coherence_scores` alongside `prominence`.
+2. **Water-fill** with `--orch-or` to bias hypersphere radii toward coherent, high-prominence patches.
+3. **Validate/Tune** using `scripts/test_orch_or.py` (runs export check, allocation sanity, and a temperature sweep).
+
+#### Temperature Hyperparameter
+
+`--orch-or-temperature` controls how aggressively low-entropy patches dominate:
+
+| T Value | Behavior | When to use |
+|---------|----------|-------------|
+| 1e-8    | Extremely sharp | Only the most certain patches should win |
+| 1e-6    | Very sharp | Strong coherence bias |
+| **1e-5**| **Recommended** | Stable, wide dynamic range |
+| 1e-4    | Moderate | Softer preference for coherence |
+| 1e-3    | Gentle   | Nearly classical behavior |
+
+Radiii are clipped to `[min_radius, max_radius]` (defaults 32 → 512), so allocation simply stretches within that band.
+
+#### Expected Behavior
+
+- Top-coherence decile typically receives 10–100× more radial allocation than the bottom decile.
+- Inner shells (<100) collect noisy/high-entropy spans, middle shells carry everyday content, and the outer crust (>300) holds the “aha” patches.
+- Cone-attention and retrieval modules naturally focus on those outer shells, shifting answers toward deeper insights instead of surface statistics.
+
+#### Validation & Tuning
+
+```bash
+python scripts/test_orch_or.py --input output/manual_input.safetensors
+```
+
+The helper script verifies tensor export, inspects allocation statistics, and sweeps temperature so you can pick the sharpness that best matches your downstream task.
+
+### Theoretical Implications
+
+This is not just numerology - it changes retrieval dynamics to favor **deep insights over surface statistics**, addressing the critique that transformers lack non-computable "spark" moments. High-prominence, low-entropy patches (the model's true "aha, this is meaningful" signals) dominate the sphere's geometry, while noisy/confused regions compress toward the poles.
+
+## Summary
+
+Pre-L2-norm signal extraction is a critical architectural decision for hypersphere embedding systems. By capturing embeddings before normalization, we preserve the magnitude information necessary for:
+
+1. **Prominence-based organization** - Using L2 norms as importance weights
+2. **Density-aware placement** - Distributing points based on information density
+3. **Semantic clustering** - Grouping similar-magnitude embeddings
+4. **Quantum coherence allocation** - Orch-OR mode for consciousness-inspired retrieval
+
+The implementation in BLT-Burn provides both the raw embeddings and their L2 norms as separate outputs, plus entropy and coherence scores for Orch-OR mode, enabling flexible downstream processing.

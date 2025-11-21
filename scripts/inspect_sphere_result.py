@@ -3,6 +3,7 @@ import sys
 import json
 from pathlib import Path
 from safetensors import safe_open
+import sqlite3
 
 def inspect_safetensors(path):
     path = Path(path)
@@ -13,7 +14,7 @@ def inspect_safetensors(path):
         with safe_open(path, framework="numpy") as f:
             keys = f.keys()
             print("Keys:", list(keys))
-            
+        
             for key in keys:
                 data[key] = f.get_tensor(key)
         
@@ -29,23 +30,70 @@ def inspect_safetensors(path):
         print(f"Error loading safetensors: {e}")
         return
 
-    # Look for hypergraph sidecar
-    # Try direct name match or check header (if accessible, but name match is robust here)
-    meta_path = path.with_suffix(".hypergraph.json")
-    if not meta_path.exists():
-        # Check if filename matches pattern item_ID_part_X.safetensors -> item_ID.hypergraph.json
-        # This is a heuristic.
-        name = path.stem
-        if "_part_" in name:
-            base_name = name.split("_part_")[0]
-            meta_path = path.parent / f"{base_name}.hypergraph.json"
-            
-    if meta_path.exists():
+    # Look for hypergraph sidecar - try SQLite first, then JSON
+    meta_db_path = path.with_suffix(".hypergraph.db")
+    meta_json_path = path.with_suffix(".hypergraph.json")
+    
+    # Handle multi-part files
+    name = path.stem
+    if "_part_" in name:
+        base_name = name.split("_part_")[0]
+        meta_db_path = path.parent / f"{base_name}.hypergraph.db"
+        meta_json_path = path.parent / f"{base_name}.hypergraph.json"
+    
+    if meta_db_path.exists():
         try:
-            with open(meta_path, 'r') as f:
+            print("\n✅ Found Hypergraph Sidecar (SQLite):")
+            print(f"  File: {meta_db_path.name}")
+            
+            conn = sqlite3.connect(meta_db_path)
+            cursor = conn.cursor()
+            
+            # Read metadata
+            cursor.execute("SELECT value FROM meta WHERE key='schema_version'")
+            result = cursor.fetchone()
+            if result:
+                print(f"  Schema Version: {result[0]}")
+            
+            # Count nodes and edges
+            cursor.execute("SELECT COUNT(*) FROM nodes")
+            node_count = cursor.fetchone()[0]
+            cursor.execute("SELECT COUNT(*) FROM hyperedges")
+            edge_count = cursor.fetchone()[0]
+            
+            print(f"  Nodes: {node_count}")
+            print(f"  Hyperedges: {edge_count}")
+            
+            # Check for sharding info
+            try:
+                cursor.execute("SELECT value FROM meta WHERE key='sharding_info'")
+                result = cursor.fetchone()
+                if result:
+                    sharding_info = json.loads(result[0])
+                    print(f"  Sharding Info:")
+                    print(f"    Global shape: {sharding_info['global_shape']}")
+                    print(f"    Shard {sharding_info['shard_index'] + 1}/{sharding_info['num_shards']}")
+                    print(f"    Axis: {sharding_info['axis']}")
+                    if 'process_index' in sharding_info:
+                        print(f"      Target process: {sharding_info['process_index']}")
+            except:
+                pass
+            
+            # Note: Actual deserialization would require bincode-compatible Python library
+            print("  (Note: Full inspection requires bincode deserialization)")
+            
+            conn.close()
+            
+        except Exception as e:
+            print(f"Error reading SQLite hypergraph: {e}")
+    
+    elif meta_json_path.exists():
+        try:
+            print("\n✅ Found Hypergraph Sidecar (JSON):")
+            print(f"  File: {meta_json_path.name}")
+            
+            with open(meta_json_path, 'r') as f:
                 meta = json.load(f)
-            print("\n✅ Found Hypergraph Sidecar:")
-            print(f"  File: {meta_path.name}")
             
             nodes = meta.get('nodes', [])
             edges = meta.get('edges', [])
@@ -148,7 +196,7 @@ if __name__ == "__main__":
         results_dir = Path("ingest_output")
         if results_dir.exists():
             files = list(results_dir.glob("*.safetensors"))
-            if files:
+        if files:
                 inspect_safetensors(files[0])
             else:
                 print("No .safetensors files found in ingest_output.")

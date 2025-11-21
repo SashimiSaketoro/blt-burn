@@ -1,0 +1,18 @@
+[
+  {
+    "task_id": "test-001",
+    "prompt": "Create a comprehensive marketing strategy for a new eco-friendly water bottle brand targeting Gen Z consumers.",
+    "sector": "Marketing",
+    "occupation": "Marketing Manager",
+    "reference_files": ["marketing_brief.pdf", "competitor_analysis.xlsx"],
+    "reference_file_urls": ["https://example.com/marketing_brief.pdf", "https://example.com/competitor_analysis.xlsx"]
+  },
+  {
+    "task_id": "test-002", 
+    "prompt": "Design a sustainable urban transportation system for a mid-sized city with 500,000 residents.",
+    "sector": "Engineering",
+    "occupation": "Urban Planner",
+    "reference_files": ["city_map.png", "transport_data.csv"],
+    "reference_file_urls": ["https://example.com/city_map.png", "https://example.com/transport_data.csv"]
+  }
+]

@@ -1,11 +1,12 @@
 use burn::{
     config::Config,
     module::{Module, Param},
-    nn::{
-        self,
-        Linear, LinearConfig,
+    nn::{self, Linear, LinearConfig},
+    tensor::{
+        activation::{silu, softmax},
+        backend::Backend,
+        Tensor,
     },
-    tensor::{activation::{softmax, silu}, backend::Backend, Tensor},
 };
 
 #[derive(Config, Debug)]
@@ -25,12 +26,13 @@ pub struct LMTransformerConfig {
 
 impl LMTransformerConfig {
     pub fn init<B: Backend>(&self, device: &B::Device) -> LMTransformer<B> {
-        let head_dim = self.head_dim.unwrap_or(self.dim / self.n_heads.unwrap_or(1));
+        let head_dim = self
+            .head_dim
+            .unwrap_or(self.dim / self.n_heads.unwrap_or(1));
         let n_heads = self.n_heads.unwrap_or(self.dim / head_dim);
         let n_kv_heads = self.n_kv_heads.unwrap_or(n_heads);
 
-        let tok_embeddings = nn::EmbeddingConfig::new(self.vocab_size, self.dim)
-            .init(device);
+        let tok_embeddings = nn::EmbeddingConfig::new(self.vocab_size, self.dim).init(device);
 
         let layers = (0..self.n_layers)
             .map(|_| {
@@ -77,6 +79,12 @@ pub struct ModelOutput<B: Backend> {
     /// L2 norms of pre-norm embeddings [batch, seq]
     /// Direct prominence/density signal for water-filling
     pub embedding_norms: Tensor<B, 2>,
+    /// Entropy computed from logits [batch, seq]
+    /// Used for Orch-OR quantum coherence allocation
+    pub entropies: Option<Tensor<B, 2>>,
+    /// Coherence scores: pre_norm^2 / entropy [batch, seq]
+    /// Penrose-Hameroff "superposition mass" signal
+    pub coherence_scores: Option<Tensor<B, 2>>,
 }
 
 #[derive(Module, Debug)]
@@ -96,7 +104,10 @@ impl<B: Backend> LMTransformer<B> {
 
     /// Forward pass that also returns pre-normalization embeddings for water-filling
     /// This is the KEY method for extracting density signals
-    pub fn forward_with_embeddings(&self, input: Tensor<B, 2, burn::tensor::Int>) -> ModelOutput<B> {
+    pub fn forward_with_embeddings(
+        &self,
+        input: Tensor<B, 2, burn::tensor::Int>,
+    ) -> ModelOutput<B> {
         let [batch_size, seq_len] = input.dims();
         let mut x = self.tok_embeddings.forward(input);
 
@@ -108,24 +119,35 @@ impl<B: Backend> LMTransformer<B> {
         // CRITICAL: Capture embeddings BEFORE normalization
         // This is where the L2 magnitude signal lives!
         let pre_norm_embeddings = x.clone();
-        
+
         // Compute L2 norms for each position (useful for water-filling)
         // Shape: [batch, seq, dim] -> [batch, seq]
         // Optimization: Use element-wise multiplication instead of powf_scalar(2.0)
         let squared = pre_norm_embeddings.clone() * pre_norm_embeddings.clone();
         let embedding_norms = squared
-            .sum_dim(2)        // Sum over dim dimension
-            .sqrt()           // Take square root
-            .reshape([batch_size, seq_len]);      // [batch, seq, 1] -> [batch, seq]
-        
+            .sum_dim(2) // Sum over dim dimension
+            .sqrt() // Take square root
+            .reshape([batch_size, seq_len]); // [batch, seq, 1] -> [batch, seq]
+
         // Now apply normalization for standard output
         x = self.norm.forward(x);
         let logits = self.output.forward(x);
+
+        // Compute entropy from logits for Orch-OR quantum coherence
+        let entropies = crate::patcher::entropy(logits.clone());
+
+        // Compute coherence: pre_norm^2 / entropy (with stability constant)
+        // This is Penrose's gravitational self-energy ∝ mass² / decoherence rate
+        const ENTROPY_FLOOR: f64 = 1e-6; // Prevent explosion at low entropy
+        let coherence_scores =
+            embedding_norms.clone().powf_scalar(2.0) / (entropies.clone() + ENTROPY_FLOOR);
 
         ModelOutput {
             logits,
             pre_norm_embeddings,
             embedding_norms,
+            entropies: Some(entropies),
+            coherence_scores: Some(coherence_scores),
         }
     }
 
@@ -180,15 +202,17 @@ impl TransformerBlockConfig {
             .ffn_dim_multiplier
             .map(|m| (m * self.dim as f64) as usize)
             .unwrap_or(self.dim * 4);
-        
+
         // Round up to multiple_of
-        let ffn_dim_rounded = self.multiple_of * ((ffn_dim + self.multiple_of - 1) / self.multiple_of);
+        let ffn_dim_rounded =
+            self.multiple_of * ((ffn_dim + self.multiple_of - 1) / self.multiple_of);
 
         let feed_forward = FeedForwardConfig {
             dim: self.dim,
             hidden_dim: ffn_dim_rounded,
             multiple_of: self.multiple_of,
-        }.init(device);
+        }
+        .init(device);
 
         TransformerBlock {
             attention_norm,
@@ -274,11 +298,14 @@ impl<B: Backend> Attention<B> {
         let v = self.wv.forward(x);
 
         // Reshape for multi-head attention
-        let q = q.reshape([batch_size, seq_len, self.n_heads, self.head_dim])
+        let q = q
+            .reshape([batch_size, seq_len, self.n_heads, self.head_dim])
             .swap_dims(1, 2);
-        let k = k.reshape([batch_size, seq_len, self.n_kv_heads, self.head_dim])
+        let k = k
+            .reshape([batch_size, seq_len, self.n_kv_heads, self.head_dim])
             .swap_dims(1, 2);
-        let v = v.reshape([batch_size, seq_len, self.n_kv_heads, self.head_dim])
+        let v = v
+            .reshape([batch_size, seq_len, self.n_kv_heads, self.head_dim])
             .swap_dims(1, 2);
 
         // TODO: Apply RoPE here
@@ -291,7 +318,8 @@ impl<B: Backend> Attention<B> {
         let v = Self::repeat_kv(v, n_rep);
 
         // Compute attention scores
-        let scores = q.matmul(k.clone().swap_dims(2, 3))
+        let scores = q
+            .matmul(k.clone().swap_dims(2, 3))
             .div_scalar((self.head_dim as f64).sqrt());
 
         // TODO: Apply Causal Mask here
@@ -301,9 +329,10 @@ impl<B: Backend> Attention<B> {
         let output = attn.matmul(v);
 
         // Reshape back to [batch, seq, n_heads * head_dim]
-        let output = output
-            .swap_dims(1, 2)
-            .reshape([batch_size, seq_len, self.n_heads * self.head_dim]);
+        let output =
+            output
+                .swap_dims(1, 2)
+                .reshape([batch_size, seq_len, self.n_heads * self.head_dim]);
 
         self.wo.forward(output)
     }
@@ -326,7 +355,6 @@ pub struct FeedForwardConfig {
 }
 
 impl FeedForwardConfig {
-
     pub fn init<B: Backend>(&self, device: &B::Device) -> FeedForward<B> {
         let w1 = LinearConfig::new(self.dim, self.hidden_dim)
             .with_bias(false)
@@ -367,7 +395,6 @@ pub struct RmsNormConfig {
 }
 
 impl RmsNormConfig {
-
     pub fn init<B: Backend>(&self, device: &B::Device) -> RmsNorm<B> {
         let weight = Param::from_tensor(Tensor::ones([self.dim], device));
         RmsNorm {
@@ -387,10 +414,7 @@ impl<B: Backend> RmsNorm<B> {
     pub fn forward(&self, x: Tensor<B, 3>) -> Tensor<B, 3> {
         // Optimization: Use element-wise multiplication instead of powf_scalar(2.0)
         let squared = x.clone() * x.clone();
-        let norm = squared
-            .mean_dim(2)
-            .sqrt()
-            .add_scalar(self.epsilon);
+        let norm = squared.mean_dim(2).sqrt().add_scalar(self.epsilon);
 
         // norm is [batch, seq, 1]
         // weight is [dim] -> reshape to [1, 1, dim] for broadcasting

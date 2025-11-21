@@ -102,5 +102,13 @@ blt-burn/
 
 ---
 
-**Last Updated**: 2025-11-19  
-**Version**: 0.1.0
+**Last Updated**: 2025-11-20  
+**Version**: 0.2.0
+
+## What's New in v0.2
+
+- **SQLite Hypergraph Sidecars**: Replaced JSON with SQLite for production-scale storage
+- **JAX-Compatible Sharding**: Automatic dataset sharding for distributed processing
+- **User-Controlled FFmpeg**: Interactive installation prompts instead of automatic build-time installation  
+- **Improved Documentation**: Added modality status matrix, end-to-end examples, and API quick reference
+- **Python Script Updates**: Full support for SQLite sidecars in inspection and water-filling scripts
