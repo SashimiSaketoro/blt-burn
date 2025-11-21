@@ -10,10 +10,23 @@ target/
 *.pt
 *.pth
 
-# Output directories
+# Output and dataset directories
 ingest_output/
+ingest_output_dataset/
+ingest_output_test/
 dataset_cache/
 sphere_results/
+tests/
+test_output/
+test_output_video/
+test_pipeline/
+test_samples/
+treevgr_output/
+treevgr_test/
+gdpval_test/
+gdpval_test_output/
+test_fineweb/
+test_gdpval/
 
 # IDE
 .vscode/
@@ -39,4 +52,8 @@ env/
 # Documentation builds
 docs/_build/
 site/
+
+# Generated caches and large binary artifacts
+**/.cache/
+*.hypergraph.db
 
