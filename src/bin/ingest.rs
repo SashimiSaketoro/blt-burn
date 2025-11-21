@@ -40,9 +40,9 @@ struct Args {
     #[arg(long, default_value = "sample-10BT")]
     subset: String,
 
-    /// Dataset split
-    #[arg(long, default_value = "train")]
-    split: String,
+    /// Dataset split (optional - if not specified, ingests all available data)
+    #[arg(long)]
+    split: Option<String>,
 
     /// Limit number of dataset items to process
     #[arg(long)]
@@ -775,14 +775,15 @@ fn main() -> anyhow::Result<()> {
         }
     } else {
         // Dataset mode (default)
+        let split_display = args.split.as_deref().unwrap_or("all");
         println!(
-            "Loading FineWeb-Edu dataset ({}/{})...",
-            args.subset, args.split
+            "Loading FineWeb-Edu dataset (subset: {}, split: {})...",
+            args.subset, split_display
         );
         println!("Cache directory: {}", args.cache_dir);
         fs::create_dir_all(&args.cache_dir).expect("Failed to create cache directory");
 
-        let dataset = FineWebEduDataset::new(&args.subset, &args.split, &args.cache_dir)
+        let dataset = FineWebEduDataset::new(&args.subset, args.split.as_deref(), &args.cache_dir)
             .expect("Failed to load dataset");
 
         println!("Dataset size: {}", dataset.len());

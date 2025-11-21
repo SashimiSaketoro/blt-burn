@@ -16,6 +16,14 @@ fn find_project_venv() -> Option<PathBuf> {
         if venv.exists() {
             return Some(venv);
         }
+        
+        // Try two levels up (for submodule case: TheSphere-JAX/external/blt-burn)
+        if let Some(grandparent) = parent.parent() {
+            let venv = grandparent.join(".venv");
+            if venv.exists() {
+                return Some(venv);
+            }
+        }
     }
     
     None

@@ -9,7 +9,7 @@ Use this as a drop-in for consuming applications to load pre-norm embeddings, pr
 import jax
 import jax.numpy as jnp
 import numpy as np
-from safetensors.flax import load_file
+from safetensors.numpy import load_file
 from typing import Dict
 import argparse
 import json
@@ -122,26 +122,65 @@ def load_blt_output(safetensors_path: str) -> Dict[str, jnp.ndarray]:
     
     # After loading, if hypergraph db exists and coherence present, inject
     if format_type == "hypergraph-sqlite" and 'coherence_scores' in data:
-        conn = sqlite3.connect(meta_path)
-        cursor = conn.cursor()
-        
-        # Assume patch_indices maps to node_ids (simplified)
-        patch_indices = data.get('patch_indices', jnp.arange(len(data['coherence_scores'])))
-        
-        # Aggregate mean coherence per patch (group by patch_indices)
-        unique_patches = jnp.unique(patch_indices)
-        agg_coherence = [jnp.mean(data['coherence_scores'][patch_indices == p]) for p in unique_patches]
-        
-        # Update nodes (assume node_id starts from 1, matches unique_patches)
-        for node_id, score in enumerate(agg_coherence, start=1):
-            cursor.execute(
-                "UPDATE nodes SET metadata = json_set(metadata, '$.coherence_score', ?) WHERE id = ?",
-                (float(score), node_id)
-            )
-        
-        conn.commit()
-        conn.close()
-        print("  Injected aggregated coherence scores into hypergraph nodes.")
+        try:
+            conn = sqlite3.connect(meta_path)
+            cursor = conn.cursor()
+            
+            # Use numpy for indexing (avoid JAX/Metal issues)
+            coherence_np = np.array(data['coherence_scores'])
+            # Flatten if needed (handle (1, N) or (N,) shapes)
+            if coherence_np.ndim > 1:
+                coherence_np = coherence_np.flatten()
+            
+            patch_indices = data.get('patch_indices', None)
+            if patch_indices is not None:
+                patch_indices = np.array(patch_indices)
+                if patch_indices.ndim > 1:
+                    patch_indices = patch_indices.flatten()
+                
+                # patch_indices contains START positions of patches, not per-token assignments
+                # We need to aggregate token-level coherence into patch-level coherence
+                if len(patch_indices) > 0 and len(patch_indices) < len(coherence_np):
+                    # Sort patch starts to ensure order
+                    patch_starts = np.sort(patch_indices)
+                    
+                    # Compute patch boundaries: each patch goes from start[i] to start[i+1] (or end)
+                    num_patches = len(patch_starts)
+                    patch_coherences = []
+                    
+                    for i in range(num_patches):
+                        start_idx = int(patch_starts[i])
+                        # End index is next patch start, or end of sequence
+                        if i + 1 < num_patches:
+                            end_idx = int(patch_starts[i + 1])
+                        else:
+                            end_idx = len(coherence_np)
+                        
+                        # Aggregate coherence for tokens in this patch
+                        if start_idx < len(coherence_np) and end_idx <= len(coherence_np):
+                            patch_coherence = np.mean(coherence_np[start_idx:end_idx])
+                            patch_coherences.append(float(patch_coherence))
+                    
+                    # Update hypergraph nodes with patch-level coherence
+                    # Note: node_id mapping assumes leaves are in order (may need adjustment based on actual hypergraph structure)
+                    for patch_idx, score in enumerate(patch_coherences, start=1):
+                        # Try to find leaf nodes and update them
+                        # This is a simplified approach - full implementation would need to map patches to leaf IDs
+                        cursor.execute(
+                            "UPDATE nodes SET metadata = json_set(metadata, '$.coherence_score', ?) WHERE id = ?",
+                            (score, patch_idx)
+                        )
+                    
+                    conn.commit()
+                    print(f"  Injected {len(patch_coherences)} patch-level coherence scores into hypergraph nodes.")
+                else:
+                    print(f"  Note: patch_indices shape ({patch_indices.shape}) unexpected for coherence ({coherence_np.shape}), skipping aggregation")
+            else:
+                print("  Note: No patch_indices found, skipping coherence aggregation")
+            
+            conn.close()
+        except Exception as e:
+            print(f"  Warning: Could not inject coherence into hypergraph: {e}")
 
     # Convert to JAX arrays
     return {k: jnp.array(v) for k, v in data.items()}
