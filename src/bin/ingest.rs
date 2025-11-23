@@ -152,7 +152,7 @@ fn ensure_ffmpeg_interactive(args: &Args) -> Result<(bool, Option<PathBuf>), any
         let options = vec![
             "Install ffmpeg now (recommended)",
             "Continue without audio/video support",
-            "I installed it myself – retry detection",
+            "Manually installed – retry detection",
             "Abort",
         ];
 
@@ -327,7 +327,7 @@ fn process_data(
     let embeddings = Tensor::cat(chunk_embeddings_list, 1).reshape([1, total_tokens, 768]);
 
     // Compute coherence scores: pre_norm^2 / entropy
-    // This is Penrose's gravitational self-energy for Orch-OR allocation
+    // This combines prominence signal with inverse entropy as confidence weighting
     let coherence_scores = norms.clone().powf_scalar(2.0) / (entropies.clone() + 1e-6);
 
     let mask = patch_start_mask_from_entropy_with_monotonicity(entropies.clone(), threshold);

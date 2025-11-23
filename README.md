@@ -2,16 +2,16 @@
 
 > **Partial Rust implementation of ByteLatent Transformer (BLT) entropy model with Burn framework, specifically designed for hypersphere embedding pipelines.**
 
-⚠️ **Note**: This is NOT a complete port of the original BLT repository. This implementation focuses specifically on entropy-based text segmentation and pre-norm signal extraction for hypersphere embeddings. Many features from the original BLT are intentionally omitted.
+> **Note**: This is NOT a complete port of the original BLT repository. This implementation focuses specifically on entropy-based text segmentation and pre-norm signal extraction for hypersphere embeddings. Many features from the original BLT are intentionally omitted.
 
 [![License](https://img.shields.io/badge/License-CC%20BY--NC%204.0-lightgrey.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.70+-orange.svg)](https://www.rust-lang.org/)
 
 ## What's New in v0.3
 
-- **🔥 Orch-OR Quantum Coherence Mode**: Penrose-Hameroff inspired water-filling allocation (`--orch-or` flag)
-- **Entropy & Coherence Export**: Full quantum signals exported to safetensors
-- **Consciousness-Biased Retrieval**: Favor high-coherence "aha" moments over surface statistics
+- **Entropy-Weighted Prominence**: Physics-inspired water-filling allocation (`--entropy-weighted` flag)
+- **Entropy & Coherence Export**: Full signal metrics exported to safetensors
+- **Coherence-Biased Retrieval**: Favor low-entropy, high-confidence segments over surface statistics
 
 ## What's New in v0.2
 
@@ -51,20 +51,20 @@ If you need the full BLT functionality, please refer to the [original repository
 
 - **Video Processing**: Requires FFmpeg to be installed (handled automatically by build script).
 
-## Orch-OR Quantum Coherence Quick Start
+## Entropy-Weighted Prominence Quick Start
 
 ```bash
 # 1. Run ingestion (exports entropy + coherence automatically)
 cargo run --release --bin ingest -- --file input.txt --output-dir output/
 
-# 2. Apply Orch-OR water-filling
-python scripts/water_filling_integration.py --input output/ --orch-or
+# 2. Apply entropy-weighted water-filling
+python scripts/water_filling_integration.py --input output/ --entropy-weighted
 
 # 3. Test and validate
-python scripts/test_orch_or.py --input output/item_0.safetensors
+python scripts/test_entropy_weighted.py --input output/item_0.safetensors
 ```
 
-See [docs/PRE_NORM_SIGNAL_EXTRACTION.md](docs/PRE_NORM_SIGNAL_EXTRACTION.md#orch-or-quantum-coherence-mode) for the full write-up.
+See [docs/PRE_NORM_SIGNAL_EXTRACTION.md](docs/PRE_NORM_SIGNAL_EXTRACTION.md#entropy-weighted-prominence-allocation) for the full write-up.
 
 ## Quick Start
 
@@ -127,7 +127,7 @@ cargo run --bin ingest
 
 - ✅ **Pre-L2-Norm Signal Extraction** - Preserves magnitude variance for prominence detection
 - ✅ **Entropy-Based Patching** - Monotonic boundary detection using model confidence
-- ✅ **Orch-OR Quantum Coherence** - Penrose-Hameroff inspired allocation for consciousness-biased retrieval
+- ✅ **Entropy-Weighted Allocation** - Physics-inspired allocation for coherence-biased retrieval
 - ✅ **Multimodal Support** - Text, images, audio, code pre-tokenization
 - ✅ **Pure-Rust Approach** - No system dependencies for core functionality
 - ✅ **GPU Acceleration** - Automatic acceleration via WGPU

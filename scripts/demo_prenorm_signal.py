@@ -171,9 +171,9 @@ def demonstrate_signal_loss():
     print("\n" + "=" * 70)
     print("CONCLUSION")
     print("=" * 70)
-    print("\n  ✅ ALWAYS extract embeddings BEFORE final normalization")
+    print("\n  ✅ Extract embeddings BEFORE final normalization")
     print("  ✅ Use L2 norms as prominence/density/energy signal")
-    print("  ✅ Essential for water-filling optimization")
+    print("  ✅ Important for water-filling optimization")
     print("  ✅ Enables outlier detection and intelligent shell placement")
     print("\n" + "=" * 70)
     

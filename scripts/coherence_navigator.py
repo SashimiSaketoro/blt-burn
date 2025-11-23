@@ -30,7 +30,8 @@ def prioritize_nodes(G: nx.Graph, top_k: int = 10) -> List[int]:
     sorted_nodes = sorted(G.nodes(data=True), key=lambda x: x[1].get('coherence', 0.0), reverse=True)
     return [n[0] for n in sorted_nodes[:top_k]]
 
-def mental_travel(G: nx.Graph, start_node: int, threshold: float = 0.5) -> List[int]:
+def coherence_guided_traversal(G: nx.Graph, start_node: int, threshold: float = 0.5) -> List[int]:
+    """Navigate through high-coherence nodes in the hypergraph"""
     path = [start_node]
     current = start_node
     visited = set([current])
@@ -53,10 +54,10 @@ def mental_travel(G: nx.Graph, start_node: int, threshold: float = 0.5) -> List[
     return path
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Quantum Graph Navigator")
+    parser = argparse.ArgumentParser(description="Hypergraph Coherence Navigator")
     parser.add_argument("--db", type=str, required=True, help="Path to hypergraph.db")
     parser.add_argument("--start-node", type=int, default=1, help="Starting node ID")
-    parser.add_argument("--threshold", type=float, default=0.5, help="Coherence threshold for travel")
+    parser.add_argument("--threshold", type=float, default=0.5, help="Coherence threshold for traversal")
     args = parser.parse_args()
     
     G = load_hypergraph(args.db)
@@ -65,5 +66,5 @@ if __name__ == "__main__":
     high_priority = prioritize_nodes(G)
     print("Top coherent nodes:", high_priority)
     
-    path = mental_travel(G, args.start_node, args.threshold)
-    print("Mental travel path:", path)
+    path = coherence_guided_traversal(G, args.start_node, args.threshold)
+    print("Coherence-guided path:", path)

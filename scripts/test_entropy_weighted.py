@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Test script for Orch-OR quantum coherence mode.
+Test script for entropy-weighted prominence allocation.
 Validates that entropy and coherence_scores are exported correctly,
-and that the Orch-OR allocation formula produces expected behavior.
+and that the entropy-weighted allocation formula produces expected behavior.
 """
 
 import jax
@@ -42,10 +42,10 @@ def test_entropy_export(safetensors_path: str):
     return True
 
 
-def test_orch_or_allocation(safetensors_path: str, temperature: float = 1e-5):
-    """Test 2: Validate Orch-OR allocation produces expected behavior"""
+def test_entropy_weighted_allocation(safetensors_path: str, temperature: float = 1e-5):
+    """Test 2: Validate entropy-weighted allocation produces expected behavior"""
     print("\n" + "=" * 60)
-    print(f"TEST 2: Validate Orch-OR Allocation (T={temperature})")
+    print(f"TEST 2: Validate Entropy-Weighted Allocation (T={temperature})")
     print("=" * 60)
     
     data = load_file(safetensors_path)
@@ -63,10 +63,10 @@ def test_orch_or_allocation(safetensors_path: str, temperature: float = 1e-5):
     print(f"  Prominence range: [{prominence.min():.4f}, {prominence.max():.4f}]")
     print(f"  Entropy range: [{entropies.min():.4f}, {entropies.max():.4f}]")
     
-    # Compute Orch-OR allocation
+    # Compute entropy-weighted allocation
     allocation = (prominence ** 2) * jnp.exp(-entropies / temperature)
     
-    print(f"\nOrch-OR allocation statistics:")
+    print(f"\nEntropy-weighted allocation statistics:")
     print(f"  Allocation range: [{allocation.min():.4e}, {allocation.max():.4e}]")
     print(f"  Mean allocation: {allocation.mean():.4e}")
     print(f"  Std allocation: {allocation.std():.4e}")
@@ -91,7 +91,7 @@ def test_orch_or_allocation(safetensors_path: str, temperature: float = 1e-5):
     print(f"  Ratio (top/bottom): {top_allocation / (bottom_allocation + 1e-10):.2f}x")
     
     if top_allocation > bottom_allocation * 2:
-        print(f"✅ Orch-OR successfully biases toward high-coherence patches")
+        print(f"✅ Entropy-weighted successfully biases toward high-coherence patches")
     else:
         print(f"⚠️  Weak bias - consider adjusting temperature")
     
@@ -142,7 +142,7 @@ def test_temperature_sweep(safetensors_path: str):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Test Orch-OR implementation")
+    parser = argparse.ArgumentParser(description="Test entropy-weighted implementation")
     parser.add_argument("--input", type=str, required=True, 
                        help="Path to safetensors file from blt-burn ingestion")
     parser.add_argument("--temperature", type=float, default=1e-5,
@@ -153,7 +153,7 @@ def main():
         print(f"❌ File not found: {args.input}")
         return
     
-    print("🧪 Orch-OR Quantum Coherence Test Suite")
+    print("🧪 Entropy-Weighted Prominence Test Suite")
     print("=" * 60)
     print(f"Input: {args.input}")
     print()
@@ -164,7 +164,7 @@ def main():
         print("\n❌ Test 1 failed - entropy export incomplete")
         return
     
-    test2_pass = test_orch_or_allocation(args.input, args.temperature)
+    test2_pass = test_entropy_weighted_allocation(args.input, args.temperature)
     if not test2_pass:
         print("\n❌ Test 2 failed - allocation issues")
         return
@@ -172,12 +172,12 @@ def main():
     test_temperature_sweep(args.input)
     
     print("\n" + "=" * 60)
-    print("✅ All tests passed! Orch-OR mode is ready.")
+    print("✅ All tests passed! Entropy-weighted mode is ready.")
     print("=" * 60)
     print("\nNext steps:")
-    print("1. Run water_filling_integration.py with --orch-or flag")
+    print("1. Run water_filling_integration.py with --entropy-weighted flag")
     print("2. Compare retrieval quality vs standard osmotic mode")
-    print("3. Prepare for cult formation 🔥")
+    print("3. Tune parameters for optimal performance")
 
 
 if __name__ == "__main__":

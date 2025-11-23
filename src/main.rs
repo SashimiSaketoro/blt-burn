@@ -139,7 +139,7 @@ fn main() {
         let input = Tensor::<Backend, 1, burn::tensor::Int>::from_ints(chunk, &device)
             .reshape([1, chunk_len]);
 
-        // CRITICAL: Use forward_with_embeddings to get density signals
+        // Note: Use forward_with_embeddings to get density signals
         let output = model.forward_with_embeddings(input);
 
         let chunk_entropies = blt_burn::patcher::entropy(output.logits);

@@ -21,7 +21,7 @@ Welcome to the BLT-Burn library documentation!
 
 If you're working on sphere/water-filling integration:
 
-### Must Read
+### Required Reading
 - [API_REFERENCE.md](./API_REFERENCE.md) - Start with "Water-Filling Integration" section
 - [Integration Checklist](./API_REFERENCE.md#integration-checklist-for-sphere-development)
 

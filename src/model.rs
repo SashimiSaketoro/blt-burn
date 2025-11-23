@@ -80,10 +80,10 @@ pub struct ModelOutput<B: Backend> {
     /// Direct prominence/density signal for water-filling
     pub embedding_norms: Tensor<B, 2>,
     /// Entropy computed from logits [batch, seq]
-    /// Used for Orch-OR quantum coherence allocation
+    /// Used for entropy-weighted prominence allocation
     pub entropies: Option<Tensor<B, 2>>,
     /// Coherence scores: pre_norm^2 / entropy [batch, seq]
-    /// Penrose-Hameroff "superposition mass" signal
+    /// Signal combining prominence and confidence
     pub coherence_scores: Option<Tensor<B, 2>>,
 }
 
@@ -103,7 +103,7 @@ impl<B: Backend> LMTransformer<B> {
     }
 
     /// Forward pass that also returns pre-normalization embeddings for water-filling
-    /// This is the KEY method for extracting density signals
+    /// This is the primary method for extracting density signals
     pub fn forward_with_embeddings(
         &self,
         input: Tensor<B, 2, burn::tensor::Int>,
@@ -116,8 +116,8 @@ impl<B: Backend> LMTransformer<B> {
             x = layer.forward(x.clone());
         }
 
-        // CRITICAL: Capture embeddings BEFORE normalization
-        // This is where the L2 magnitude signal lives!
+        // Important: Capture embeddings BEFORE normalization
+        // This is where the L2 magnitude signal resides
         let pre_norm_embeddings = x.clone();
 
         // Compute L2 norms for each position (useful for water-filling)
@@ -133,11 +133,11 @@ impl<B: Backend> LMTransformer<B> {
         x = self.norm.forward(x);
         let logits = self.output.forward(x);
 
-        // Compute entropy from logits for Orch-OR quantum coherence
+        // Compute entropy from logits for entropy-weighted allocation
         let entropies = crate::patcher::entropy(logits.clone());
 
         // Compute coherence: pre_norm^2 / entropy (with stability constant)
-        // This is Penrose's gravitational self-energy ∝ mass² / decoherence rate
+        // This combines prominence signal with inverse entropy as confidence weighting
         const ENTROPY_FLOOR: f64 = 1e-6; // Prevent explosion at low entropy
         let coherence_scores =
             embedding_norms.clone().powf_scalar(2.0) / (entropies.clone() + ENTROPY_FLOOR);

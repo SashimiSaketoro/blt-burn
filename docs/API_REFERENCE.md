@@ -2,7 +2,7 @@
 
 > **Documentation for the partial Rust implementation of ByteLatent Transformer (BLT) components, focused on entropy-based segmentation and sphere embedding support.**
 
-⚠️ **Scope Note**: This is a specialized implementation extracting only the BLT components needed for hypersphere embeddings. For full BLT functionality, see the [original repository](https://github.com/facebookresearch/blt).
+> **Scope Note**: This is a specialized implementation extracting only the BLT components needed for hypersphere embeddings. For full BLT functionality, see the [original repository](https://github.com/facebookresearch/blt).
 
 ---
 
@@ -338,7 +338,7 @@ let model = config.init::<Wgpu>(&device);
 
 ### Model Output Structure
 
-**Critical for sphere integration:**
+**Important for sphere integration:**
 
 ```rust
 pub struct ModelOutput<B: Backend> {
@@ -356,7 +356,7 @@ pub struct ModelOutput<B: Backend> {
 - Pre-norm embeddings preserve natural magnitude differences
 - `embedding_norms` provides the prominence signal for downstream processing
 - `entropies` captures model uncertainty at each position
-- `coherence_scores` (pre_norm² / entropy) enables Orch-OR quantum allocation
+- `coherence_scores` (pre_norm² / entropy) enables entropy-weighted allocation
 
 ### Forward Pass
 
@@ -365,7 +365,7 @@ let tokens = Tensor::<Wgpu, 2, Int>::from_data([[1, 76, 105, 112, 112, 115]], &d
 let output = model.forward_with_embeddings(tokens);
 
 // Extract for sphere processing
-let embeddings = output.pre_norm_embeddings;  // DON'T use post-norm!
+let embeddings = output.pre_norm_embeddings;  // Use pre-norm, not post-norm
 let prominence = output.embedding_norms;      // Water-filling input
 ```
 
@@ -404,17 +404,17 @@ let patch_indices = patch_start_indices_cpu(mask);
 
 ---
 
-## Orch-OR Quantum Coherence Mode
+## Entropy-Weighted Prominence Allocation
 
 ### Overview
 
-The Orch-OR (Orchestrated Objective Reduction) mode implements a Penrose-Hameroff inspired allocation strategy where hypersphere volume is distributed proportional to "proto-conscious moments":
+The entropy-weighted mode implements an allocation strategy where hypersphere volume is distributed proportional to model confidence and prominence:
 
 ```
 allocation ∝ pre_norm² × exp(-entropy / T)
 ```
 
-This biases retrieval toward patches with high coherence (low entropy) AND high prominence (large pre-norm), representing the model's most significant "aha" moments.
+This biases retrieval toward patches with high coherence (low entropy) AND high prominence (large pre-norm), representing the model's most confident and significant segments.
 
 ### Usage
 
@@ -422,36 +422,36 @@ This biases retrieval toward patches with high coherence (low entropy) AND high 
 # Run ingestion (automatically exports entropy and coherence)
 cargo run --release --bin ingest -- --file input.txt --output-dir output/
 
-# Apply Orch-OR water-filling
+# Apply entropy-weighted water-filling
 python scripts/water_filling_integration.py \
     --input output/ \
-    --orch-or \
-    --orch-or-temperature 1e-5
+    --entropy-weighted \
+    --entropy-temperature 1e-5
 ```
 
 ### Testing
 
 ```bash
 # Validate implementation
-python scripts/test_orch_or.py --input output/item_0.safetensors
+python scripts/test_entropy_weighted.py --input output/item_0.safetensors
 
 # Temperature sweep to find optimal T
-python scripts/test_orch_or.py --input output/item_0.safetensors --temperature 1e-6
+python scripts/test_entropy_weighted.py --input output/item_0.safetensors --temperature 1e-6
 ```
 
 ### Parameters
 
-- `--orch-or`: Enable Orch-OR mode (flag)
-- `--orch-or-temperature`: Planck temperature T (default: 1e-5)
+- `--entropy-weighted`: Enable entropy-weighted mode (flag)
+- `--entropy-temperature`: Temperature T (default: 1e-5)
   - Lower T (1e-6): Sharper bias toward low-entropy patches
   - Higher T (1e-4): Softer bias, more classical behavior
 
 ### Theory
 
-Maps Penrose-Hameroff quantum consciousness to embedding geometry:
-- **Superposition size**: pre_norm (how "big" the quantum state is)
-- **Objective reduction**: entropy spike (when coherence collapses)
-- **Conscious volume**: sphere allocation (how much "reality" this patch gets)
+The allocation combines signal strength with model confidence:
+- **Prominence**: pre_norm (magnitude of the representation)
+- **Confidence**: inverse entropy (certainty of the prediction)
+- **Allocation**: sphere volume (spatial prominence on the hypersphere)
 
 High-coherence patches dominate the hypersphere center, while confused/noisy regions compress to poles.
 
@@ -656,13 +656,13 @@ BLT-Burn supports automatic sharding for JAX distributed processing:
 ```bash
 # Generate sharded output (auto-shards if >100k tokens)
 cargo run --bin ingest -- \
-    --text "Your large text here..." \
+    --text "The large text content..." \
     --output output/ \
     --num-shards 4
 
 # Or control shard size
 cargo run --bin ingest -- \
-    --text "Your text..." \
+    --text "The text content..." \
     --output output/ \
     --shard-size 50000  # 50k tokens per shard
 ```
@@ -808,7 +808,7 @@ The entropy threshold controls patch boundary detection:
 
 #### Threshold Tuning Script
 
-Use `scripts/tune_entropy_threshold.py` to find optimal thresholds for your data:
+Use `scripts/tune_entropy_threshold.py` to find optimal thresholds for the dataset:
 
 ```bash
 # Test different thresholds on various modalities
@@ -849,7 +849,7 @@ Recommended threshold: 1.35 (Mean size 127.3 closest to target 128)
 
 ### Integration Parameters
 
-The specific parameters for hypersphere organization (shells, radii, etc.) depend on your downstream processing pipeline and should be tuned based on your specific use case.
+The specific parameters for hypersphere organization (shells, radii, etc.) depend on the downstream processing pipeline and should be tuned based on the specific use case.
 
 ---
 

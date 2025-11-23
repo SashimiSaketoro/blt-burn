@@ -370,10 +370,10 @@ def thrml_energy_water_filling(embeddings_raw: jnp.ndarray,
 
 
 # ============================================================================
-# METHOD 3: ORCH-OR QUANTUM COHERENCE (Penrose-Hameroff Inspired)
+# METHOD 3: ENTROPY-WEIGHTED PROMINENCE ALLOCATION
 # ============================================================================
 
-def orch_or_water_filling(
+def entropy_weighted_water_filling(
     embeddings_raw: jnp.ndarray,
     prominence: jnp.ndarray,
     entropies: jnp.ndarray,
@@ -383,40 +383,33 @@ def orch_or_water_filling(
     n_shells: int = 256,
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
     """
-    Orch-OR inspired allocation: power ∝ pre_norm^2 * exp(-entropy / T)
+    Entropy-weighted allocation: power ∝ pre_norm^2 * exp(-entropy / T)
     
-    Penrose-Hameroff mapping:
-    - pre_norm^2: Gravitational self-energy (superposition size)
-    - exp(-entropy/T): Quantum decoherence rate
-    - High coherence (low entropy) + high prominence = larger "conscious volume"
-    
-    This biases the hypersphere toward patches with high coherence AND high amplitude,
-    exactly like Hameroff's claim that significant moments feel "brighter" because
-    more tubulins are involved.
+    This biases the hypersphere toward patches with high coherence AND high amplitude.
     
     Args:
         embeddings_raw: [N, dim] embeddings BEFORE normalization
-        prominence: [N] pre-norm L2 norms (superposition mass)
-        entropies: [N] Shannon entropy from logits (decoherence)
-        temperature: Planck temperature T (default: 1e-5)
+        prominence: [N] pre-norm L2 norms (prominence signal)
+        entropies: [N] Shannon entropy from logits (uncertainty)
+        temperature: Temperature T (default: 1e-5)
         min_radius: Minimum radius (hollow core)
         max_radius: Maximum radius
         n_shells: Number of shells for discretization
     
     Returns:
-        radii: [N] optimal radii (conscious volume allocation)
+        radii: [N] optimal radii
         shells: [N] shell assignments
     """
     # Ensure 1D arrays
     prominence = prominence.reshape(-1)
     entropies = entropies.reshape(-1)
     
-    # Orch-OR allocation formula
+    # Allocation formula
     # allocation ∝ pre_norm^2 * exp(-entropy / T)
     allocation = (prominence ** 2) * jnp.exp(-entropies / temperature)
     
     # Softmax normalization for proper probabilistic interpretation
-    # (fraction of total conscious volume)
+    # (fraction of total volume)
     allocation_softmax = jax.nn.softmax(allocation / jnp.max(allocation))
     
     # Map to radii (use softmax for smooth distribution)
@@ -437,8 +430,8 @@ if __name__ == "__main__":
     parser.add_argument("--output-dir", type=str, default="sphere_output", help="Directory to save sphere results")
     parser.add_argument("--method", type=str, default="osmotic", choices=["osmotic", "thrml"], help="Water-filling method")
     parser.add_argument("--min-radius", type=float, default=32.0, help="Minimum radius for hollow core")
-    parser.add_argument("--orch-or", action="store_true", help="Enable Orch-OR quantum coherence allocation mode")
-    parser.add_argument("--orch-or-temperature", type=float, default=None, help="Planck temperature T for Orch-OR mode (default: auto-tune)")
+    parser.add_argument("--entropy-weighted", action="store_true", help="Enable entropy-weighted allocation mode")
+    parser.add_argument("--entropy-temperature", type=float, default=1e-5, help="Temperature T for entropy-weighted mode (default: 1e-5)")
     args = parser.parse_args()
     
     input_path = Path(args.input)
@@ -502,16 +495,16 @@ if __name__ == "__main__":
             
             # Run Water Filling
             radii, shells = None, None
-            if args.orch_or:
+            if args.entropy_weighted:
                 if entropies is None:
-                    raise ValueError("--orch-or requires entropies in safetensors. "
+                    raise ValueError("--entropy-weighted requires entropies in safetensors. "
                                    "Re-run blt-burn ingestion with updated code.")
-                print(f"  Using Orch-OR mode (T={args.orch_or_temperature})")
-                radii, shells = orch_or_water_filling(
+                print(f"  Using Entropy-Weighted mode (T={args.entropy_temperature})")
+                radii, shells = entropy_weighted_water_filling(
                     embeddings,
                     prominence,
                     entropies,
-                    temperature=args.orch_or_temperature,
+                    temperature=args.entropy_temperature,
                     min_radius=args.min_radius
                 )
             elif args.method == "osmotic":

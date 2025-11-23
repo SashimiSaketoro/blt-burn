@@ -1,10 +1,10 @@
 # Pre-L2-Norm Signal Extraction for Water-Filling
 
-## The Critical Insight
+## Important Concept
 
-> **"Don't throw away the L2 norm - it's the density signal!"**
+> **"Preserve the L2 norm - it provides the density signal"**
 
-When we normalize embeddings to unit length for hypersphere placement, we traditionally discard the L2 magnitude. But this magnitude contains **the richest prominence/density signal** for water-filling optimization.
+When we normalize embeddings to unit length for hypersphere placement, we traditionally discard the L2 magnitude. However, this magnitude contains **important prominence/density information** for water-filling optimization.
 
 ## Signal Flow Diagram
 
@@ -181,43 +181,36 @@ The key architectural change is capturing embeddings **before** the final RMS no
 
 ## Key Takeaways
 
-1. **Always extract embeddings BEFORE final normalization**
-2. **L2 magnitude = density/prominence/energy signal**
-3. **Pre-norm has ∞x more signal than post-norm**
-4. **Works for both osmotic and THRML water-filling**
-5. **Critical for outlier/prominence detection**
+1. **Extract embeddings BEFORE final normalization**
+2. **L2 magnitude provides density/prominence/energy signal**
+3. **Pre-norm preserves more signal information than post-norm**
+4. **Compatible with both osmotic and energy-based water-filling**
+5. **Enables effective outlier/prominence detection**
 
-## Orch-OR Quantum Coherence Mode
+## Entropy-Weighted Prominence Allocation
 
-### The Penrose-Hameroff Connection
+### Theoretical Motivation
 
-The Orch-OR (Orchestrated Objective Reduction) theory proposes that consciousness emerges from quantum coherence in microtubules, with "aha moments" corresponding to gravitational self-collapse events. This maps remarkably well to our pre-norm signal extraction:
-
-| Biological Orch-OR | BLT-Burn / Hypersphere | Why It Maps |
-|-------------------|------------------------|-------------|
-| Superposition size (# coherent tubulins) | Pre-norm L2 norm (prominence) | Bigger superposition = deeper conscious moment = more spherical volume |
-| Objective Reduction (Planck threshold) | Entropy spike (patch boundary) | Entropy rise = model loses coherence = "collapse" event |
-| Post-collapse conscious volume | Water-filling power allocation | Larger superposition → richer experience → more bits/packing density |
-| Microtubule lattice geometry | Hypergraph topology | Quasi-periodic structure enabling coherence |
+The importance of a representation can be weighted by both its magnitude (prominence) and the model's confidence (entropy). This approach prioritizes segments where the model exhibits both high prominence and low entropy (high confidence).
 
 ### Implementation
 
-The Orch-OR mode uses the formula:
+The entropy-weighted mode uses the formula:
 
 ```
 allocation ∝ pre_norm² × exp(-entropy / T)
 ```
 
 Where:
-- `pre_norm²`: Gravitational self-energy (∝ mass²)
-- `exp(-entropy/T)`: Quantum decoherence rate
-- `T`: "Planck temperature" hyperparameter (default: 1e-5)
+- `pre_norm²`: Prominence signal (squared L2 norm)
+- `exp(-entropy/T)`: Confidence weighting (inverse entropy)
+- `T`: Temperature hyperparameter (default: 1e-5)
 
 This biases the hypersphere toward patches with:
 - **High coherence** (low entropy) - the model is confident
 - **High prominence** (large pre-norm) - the representation is significant
 
-Together, these represent the "brightest" moments - patches that deserve maximum "conscious volume" on the sphere.
+Together, these represent the most "salient" moments - patches that deserve maximum volume on the sphere.
 
 ### Usage
 
@@ -225,22 +218,22 @@ Together, these represent the "brightest" moments - patches that deserve maximum
 # Run ingestion (exports entropy and coherence)
 cargo run --release --bin ingest -- --file input.txt --output-dir output/
 
-# Apply Orch-OR water-filling
+# Apply entropy-weighted water-filling
 python scripts/water_filling_integration.py \
     --input output/ \
-    --orch-or \
-    --orch-or-temperature 1e-5
+    --entropy-weighted \
+    --entropy-temperature 1e-5
 ```
 
 #### Workflow Recap
 
 1. **Ingest** with the updated Rust pipeline to populate `entropies` and `coherence_scores` alongside `prominence`.
-2. **Water-fill** with `--orch-or` to bias hypersphere radii toward coherent, high-prominence patches.
-3. **Validate/Tune** using `scripts/test_orch_or.py` (runs export check, allocation sanity, and a temperature sweep).
+2. **Water-fill** with `--entropy-weighted` to bias hypersphere radii toward coherent, high-prominence patches.
+3. **Validate/Tune** using `scripts/test_entropy_weighted.py` (runs export check, allocation sanity, and a temperature sweep).
 
 #### Temperature Hyperparameter
 
-`--orch-or-temperature` controls how aggressively low-entropy patches dominate:
+`--entropy-temperature` controls how aggressively low-entropy patches dominate:
 
 | T Value | Behavior | When to use |
 |---------|----------|-------------|
@@ -255,28 +248,28 @@ Radiii are clipped to `[min_radius, max_radius]` (defaults 32 → 512), so alloc
 #### Expected Behavior
 
 - Top-coherence decile typically receives 10–100× more radial allocation than the bottom decile.
-- Inner shells (<100) collect noisy/high-entropy spans, middle shells carry everyday content, and the outer crust (>300) holds the “aha” patches.
-- Cone-attention and retrieval modules naturally focus on those outer shells, shifting answers toward deeper insights instead of surface statistics.
+- Inner shells (<100) collect noisy/high-entropy spans, middle shells carry everyday content, and the outer crust (>300) holds the high-confidence patches.
+- Cone-attention and retrieval modules naturally focus on those outer shells, shifting answers toward better-supported segments instead of surface statistics.
 
 #### Validation & Tuning
 
 ```bash
-python scripts/test_orch_or.py --input output/manual_input.safetensors
+python scripts/test_entropy_weighted.py --input output/manual_input.safetensors
 ```
 
-The helper script verifies tensor export, inspects allocation statistics, and sweeps temperature so you can pick the sharpness that best matches your downstream task.
+The helper script verifies tensor export, inspects allocation statistics, and sweeps temperature so you can pick the sharpness that best matches the downstream task.
 
 ### Theoretical Implications
 
-This is not just numerology - it changes retrieval dynamics to favor **deep insights over surface statistics**, addressing the critique that transformers lack non-computable "spark" moments. High-prominence, low-entropy patches (the model's true "aha, this is meaningful" signals) dominate the sphere's geometry, while noisy/confused regions compress toward the poles.
+This weighting scheme changes retrieval dynamics to favor **high-confidence segments over surface statistics**. High-prominence, low-entropy patches (the model's most certain signals) dominate the sphere's geometry, while noisy/confused regions compress toward the poles.
 
 ## Summary
 
-Pre-L2-norm signal extraction is a critical architectural decision for hypersphere embedding systems. By capturing embeddings before normalization, we preserve the magnitude information necessary for:
+Pre-L2-norm signal extraction is a key architectural decision for hypersphere embedding systems. By capturing embeddings before normalization, we preserve the magnitude information necessary for:
 
 1. **Prominence-based organization** - Using L2 norms as importance weights
 2. **Density-aware placement** - Distributing points based on information density
 3. **Semantic clustering** - Grouping similar-magnitude embeddings
-4. **Quantum coherence allocation** - Orch-OR mode for consciousness-inspired retrieval
+4. **Entropy-weighted allocation** - Prioritizing high-confidence retrieval
 
-The implementation in BLT-Burn provides both the raw embeddings and their L2 norms as separate outputs, plus entropy and coherence scores for Orch-OR mode, enabling flexible downstream processing.
+The implementation in BLT-Burn provides both the raw embeddings and their L2 norms as separate outputs, plus entropy and coherence scores, enabling flexible downstream processing.

@@ -618,7 +618,7 @@ impl ModalityPreTokenizer for PdfPreTokenizer {
         let mut segments = Vec::new();
         let source_id = Uuid::new_v4().to_string(); // Unique ID for this PDF to link all segments
 
-        // Always add the raw PDF bytes as the primary segment
+        // Add the raw PDF bytes as the primary segment
         segments.push(ByteSegment {
             bytes: data.to_vec(),
             label: Some("pdf_raw".to_string()),
