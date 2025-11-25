@@ -45,6 +45,9 @@ fn main() -> Result<()> {
     // Only rerun if build.rs changes
     println!("cargo:rerun-if-changed=build.rs");
 
+    // Generate build info (git hash, build time, etc.)
+    built::write_built_file().expect("Failed to write built.rs for version info");
+
     // 1. Find and configure Python venv for burn-dataset
     if let Some(venv) = find_project_venv() {
         let venv_bin = venv.join("bin");

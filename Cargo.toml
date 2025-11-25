@@ -68,6 +68,7 @@ fused-entropy = []
 [build-dependencies]
 anyhow = "1.0"
 hf-hub = "0.3.2"
+built = { version = "0.7", features = ["git2"] }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }

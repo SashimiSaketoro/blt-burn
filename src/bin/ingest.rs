@@ -1,5 +1,6 @@
 use blt_burn::{
     batching::BatchStats,
+    built_info,
     dataset::FineWebEduDataset,
     ffmpeg::{self, FfmpegError},
     model::{LMTransformer, LMTransformerConfig},
@@ -27,9 +28,25 @@ use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+/// Build long version string with git hash and feature status.
+fn long_version() -> &'static str {
+    // Use Box::leak to create a static string at runtime
+    let git_hash = built_info::GIT_COMMIT_HASH.unwrap_or("unknown");
+    let git_short = if git_hash.len() >= 7 { &git_hash[..7] } else { git_hash };
+    let fused_status = if cfg!(feature = "fused-entropy") { "enabled" } else { "disabled" };
+    
+    let version = format!(
+        "{}\nGit commit: {}\nFused kernels: {}",
+        env!("CARGO_PKG_VERSION"),
+        git_short,
+        fused_status,
+    );
+    
+    Box::leak(version.into_boxed_str())
+}
 
 #[derive(Parser, Debug)]
-#[command(author, version, about, long_about = None)]
+#[command(author, version, long_version = long_version(), about, long_about = None)]
 struct Args {
     /// Input text to patch (optional override)
     #[arg(short, long)]
@@ -137,12 +154,106 @@ struct Args {
     /// Print document size distribution statistics
     #[arg(long)]
     batch_stats: bool,
+
+    /// Enable CubeCL kernel profiling (prints kernel timings to stdout)
+    #[arg(long)]
+    profile: bool,
+
+    /// Compute and save entropy histogram for debugging patch boundaries
+    #[arg(long)]
+    entropy_histogram: bool,
+
+    /// Output path for entropy histogram JSON (default: entropy_histogram.json)
+    #[arg(long, default_value = "entropy_histogram.json")]
+    histogram_output: PathBuf,
+
+    /// Number of bins for entropy histogram (default: 50)
+    #[arg(long, default_value_t = 50)]
+    histogram_bins: usize,
 }
 
 fn compute_hash(data: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(data);
     hex::encode(hasher.finalize())
+}
+
+/// Compute standard deviation of a slice of f32 values.
+fn compute_std(values: &[f32]) -> f32 {
+    if values.is_empty() {
+        return 0.0;
+    }
+    let mean = values.iter().sum::<f32>() / values.len() as f32;
+    let variance = values.iter().map(|x| (x - mean).powi(2)).sum::<f32>() / values.len() as f32;
+    variance.sqrt()
+}
+
+/// Compute percentile of a slice of f32 values.
+fn percentile(values: &[f32], p: f32) -> f32 {
+    if values.is_empty() {
+        return 0.0;
+    }
+    let mut sorted: Vec<f32> = values.to_vec();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let idx = ((sorted.len() - 1) as f32 * p).round() as usize;
+    sorted[idx.min(sorted.len() - 1)]
+}
+
+/// Compute entropy histogram with statistics for debugging patch boundaries.
+fn compute_entropy_histogram(entropies: &[f32], num_bins: usize) -> serde_json::Value {
+    if entropies.is_empty() {
+        return serde_json::json!({
+            "error": "No entropy values to compute histogram",
+            "total_tokens": 0
+        });
+    }
+
+    let min = entropies.iter().cloned().fold(f32::INFINITY, f32::min);
+    let max = entropies.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+    
+    // Handle edge case where all values are the same
+    let bin_width = if (max - min).abs() < f32::EPSILON {
+        1.0
+    } else {
+        (max - min) / num_bins as f32
+    };
+    
+    let mut bins = vec![0u64; num_bins];
+    for &e in entropies {
+        let idx = if bin_width > 0.0 {
+            ((e - min) / bin_width).floor() as usize
+        } else {
+            0
+        };
+        bins[idx.min(num_bins - 1)] += 1;
+    }
+    
+    let mean = entropies.iter().sum::<f32>() / entropies.len() as f32;
+    let std = compute_std(entropies);
+    
+    serde_json::json!({
+        "statistics": {
+            "min": min,
+            "max": max,
+            "mean": mean,
+            "std": std,
+            "total_tokens": entropies.len(),
+        },
+        "percentiles": {
+            "p25": percentile(entropies, 0.25),
+            "p50": percentile(entropies, 0.50),
+            "p75": percentile(entropies, 0.75),
+            "p90": percentile(entropies, 0.90),
+            "p95": percentile(entropies, 0.95),
+            "p99": percentile(entropies, 0.99),
+        },
+        "histogram": {
+            "num_bins": num_bins,
+            "bin_width": bin_width,
+            "bin_edges": (0..=num_bins).map(|i| min + i as f32 * bin_width).collect::<Vec<_>>(),
+            "counts": bins,
+        },
+    })
 }
 
 /// Result: (ffmpeg_enabled, ffmpeg_path_if_any)
@@ -603,6 +714,13 @@ fn get_default_base_dir() -> String {
 
 fn main() -> anyhow::Result<()> {
     let mut args = Args::parse();
+
+    // Enable CubeCL profiling if requested
+    if args.profile {
+        std::env::set_var("CUBECL_DEBUG_OPTION", "profile");
+        std::env::set_var("CUBECL_DEBUG_LOG", "stdout");
+        println!("🔬 Profiling enabled - kernel timings will be printed to stdout");
+    }
     
     // Compute default base_dir if not provided (uses HF cache location)
     let base_dir = args.base_dir.clone().unwrap_or_else(get_default_base_dir);
@@ -780,6 +898,20 @@ fn main() -> anyhow::Result<()> {
                         Some(&metadata_db_name),
                     )?;
                     println!("✅ Saved: {} ({} patches)", path.display(), patch_lengths.len());
+
+                    // Save entropy histogram if requested
+                    if args.entropy_histogram && !entropies.is_empty() {
+                        let histogram = compute_entropy_histogram(&entropies, args.histogram_bins);
+                        let histogram_path = args.output_dir.join(&args.histogram_output);
+                        let histogram_json = serde_json::to_string_pretty(&histogram)?;
+                        std::fs::write(&histogram_path, histogram_json)?;
+                        println!(
+                            "📊 Entropy histogram saved to {} ({} tokens, {} bins)",
+                            histogram_path.display(),
+                            entropies.len(),
+                            args.histogram_bins
+                        );
+                    }
                 }
             }
             Err(e) => println!("Error processing input: {}", e),
@@ -831,6 +963,9 @@ fn main() -> anyhow::Result<()> {
         let mut processed = 0;
         let start_time = std::time::Instant::now();
 
+        // Accumulate all entropies for histogram if requested
+        let mut all_entropies: Vec<f32> = Vec::new();
+
         for doc in prefetcher {
             processed += 1;
             batch_stats.add(&doc);
@@ -849,6 +984,11 @@ fn main() -> anyhow::Result<()> {
             // This preserves entropy context integrity (no cross-doc bleeding)
             match process_data(&doc.bytes, &model, &device, args.threshold) {
                 Ok((raw_bytes, patch_lengths, entropies, sidecar)) => {
+                    // Accumulate entropies for histogram
+                    if args.entropy_histogram {
+                        all_entropies.extend_from_slice(&entropies);
+                    }
+
                     if !patch_lengths.is_empty() {
                         // Save metadata sidecar (hypergraph with patch nodes)
                         let metadata_basename = format!("item_{}", doc.id);
@@ -875,6 +1015,20 @@ fn main() -> anyhow::Result<()> {
         // Print batch statistics if requested
         if args.batch_stats {
             batch_stats.print_summary();
+        }
+
+        // Save entropy histogram if requested
+        if args.entropy_histogram && !all_entropies.is_empty() {
+            let histogram = compute_entropy_histogram(&all_entropies, args.histogram_bins);
+            let histogram_path = args.output_dir.join(&args.histogram_output);
+            let histogram_json = serde_json::to_string_pretty(&histogram)?;
+            std::fs::write(&histogram_path, histogram_json)?;
+            println!(
+                "📊 Entropy histogram saved to {} ({} tokens, {} bins)",
+                histogram_path.display(),
+                all_entropies.len(),
+                args.histogram_bins
+            );
         }
         
         let total_time = start_time.elapsed();
