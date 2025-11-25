@@ -4,6 +4,7 @@ use blt_burn::{
     dataset::FineWebEduDataset,
     ffmpeg::{self, FfmpegError},
     model::{LMTransformer, LMTransformerConfig},
+    output::WebDatasetWriter,
     patcher::{patch_lengths_from_start_indices, patch_start_indices_cpu, patch_start_mask_from_entropy_with_monotonicity},
     prefetch::DocumentPrefetcher,
     pretokenize::detect_modality,
@@ -18,7 +19,7 @@ use burn::{
     tensor::Tensor,
 };
 use burn_import::safetensors::SafetensorsFileRecorder;
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use dialoguer::Select;
 use hypergraph::VertexIndex;
 use safetensors::serialize;
@@ -27,6 +28,19 @@ use sha2::{Digest, Sha256};
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+
+/// Output format for ingested data.
+/// 
+/// SafeTensors (default): Individual .safetensors files with .hypergraph.db sidecars
+/// WebDataset: Sharded .tar.gz archives for PyTorch streaming (requires --output-format webdataset)
+#[derive(Clone, Debug, Default, ValueEnum)]
+enum OutputFormat {
+    /// Individual .safetensors files (default, recommended for most use cases)
+    #[default]
+    Safetensors,
+    /// Sharded .tar.gz archives for PyTorch WebDataset streaming
+    Webdataset,
+}
 
 /// Build long version string with git hash and feature status.
 fn long_version() -> &'static str {
@@ -170,6 +184,16 @@ struct Args {
     /// Number of bins for entropy histogram (default: 50)
     #[arg(long, default_value_t = 50)]
     histogram_bins: usize,
+
+    /// Output format: safetensors (default) or webdataset for PyTorch streaming.
+    /// SafeTensors produces individual .safetensors files with .hypergraph.db sidecars.
+    /// WebDataset produces sharded .tar.gz archives for efficient PyTorch DataLoader streaming.
+    #[arg(long, value_enum, default_value_t = OutputFormat::Safetensors)]
+    output_format: OutputFormat,
+
+    /// Number of samples per WebDataset shard (only used with --output-format webdataset)
+    #[arg(long, default_value_t = 1000)]
+    webdataset_shard_size: usize,
 }
 
 fn compute_hash(data: &[u8]) -> String {
@@ -880,24 +904,55 @@ fn main() -> anyhow::Result<()> {
         match process_data(&bytes, &model, &device, args.threshold) {
             Ok((raw_bytes, patch_lengths, entropies, sidecar)) => {
                 if !patch_lengths.is_empty() {
-                    // Save metadata sidecar
-                    let metadata_basename = filename_prefix.clone();
-                    let metadata_path = args.output_dir.join(&metadata_basename);
-                    save_metadata_sidecar(&metadata_path, &sidecar, args.export_json_metadata)?;
-                    let metadata_db_name = format!("{}.hypergraph.db", metadata_basename);
+                    match args.output_format {
+                        OutputFormat::Safetensors => {
+                            // Save metadata sidecar
+                            let metadata_basename = filename_prefix.clone();
+                            let metadata_path = args.output_dir.join(&metadata_basename);
+                            save_metadata_sidecar(&metadata_path, &sidecar, args.export_json_metadata)?;
+                            let metadata_db_name = format!("{}.hypergraph.db", metadata_basename);
 
-                    // Save patches with entropies
-                    let path = args
-                        .output_dir
-                        .join(format!("{}.safetensors", filename_prefix));
-                    save_patch_safetensors(
-                        &path,
-                        &raw_bytes,
-                        &patch_lengths,
-                        &entropies,
-                        Some(&metadata_db_name),
-                    )?;
-                    println!("✅ Saved: {} ({} patches)", path.display(), patch_lengths.len());
+                            // Save patches with entropies
+                            let path = args
+                                .output_dir
+                                .join(format!("{}.safetensors", filename_prefix));
+                            save_patch_safetensors(
+                                &path,
+                                &raw_bytes,
+                                &patch_lengths,
+                                &entropies,
+                                Some(&metadata_db_name),
+                            )?;
+                            println!("✅ Saved: {} ({} patches)", path.display(), patch_lengths.len());
+                        }
+                        OutputFormat::Webdataset => {
+                            // Use WebDataset writer for single sample
+                            let mut writer = WebDatasetWriter::new(
+                                args.output_dir.clone(),
+                                args.webdataset_shard_size,
+                            )?;
+
+                            let metadata = serde_json::json!({
+                                "source": filename_prefix,
+                                "num_patches": patch_lengths.len(),
+                                "total_bytes": raw_bytes.len(),
+                            });
+
+                            writer.add_sample(
+                                &format!("{:06}", 0),
+                                &raw_bytes,
+                                &patch_lengths,
+                                &entropies,
+                                &metadata,
+                            )?;
+
+                            let (total_samples, total_shards) = writer.finish()?;
+                            println!(
+                                "✅ WebDataset: {} sample(s) in {} shard(s)",
+                                total_samples, total_shards
+                            );
+                        }
+                    }
 
                     // Save entropy histogram if requested
                     if args.entropy_histogram && !entropies.is_empty() {
@@ -966,6 +1021,21 @@ fn main() -> anyhow::Result<()> {
         // Accumulate all entropies for histogram if requested
         let mut all_entropies: Vec<f32> = Vec::new();
 
+        // Initialize WebDataset writer if that format is selected
+        let mut webdataset_writer = match args.output_format {
+            OutputFormat::Webdataset => {
+                println!("📦 Output format: WebDataset (shard size: {})", args.webdataset_shard_size);
+                Some(WebDatasetWriter::new(
+                    args.output_dir.clone(),
+                    args.webdataset_shard_size,
+                )?)
+            }
+            OutputFormat::Safetensors => {
+                println!("📦 Output format: SafeTensors (default)");
+                None
+            }
+        };
+
         for doc in prefetcher {
             processed += 1;
             batch_stats.add(&doc);
@@ -990,26 +1060,57 @@ fn main() -> anyhow::Result<()> {
                     }
 
                     if !patch_lengths.is_empty() {
-                        // Save metadata sidecar (hypergraph with patch nodes)
-                        let metadata_basename = format!("item_{}", doc.id);
-                        let metadata_path = args.output_dir.join(&metadata_basename);
-                        save_metadata_sidecar(&metadata_path, &sidecar, args.export_json_metadata)?;
-                        let metadata_db_name = format!("{}.hypergraph.db", metadata_basename);
+                        match &mut webdataset_writer {
+                            Some(writer) => {
+                                // WebDataset format: add sample to sharded archive
+                                let metadata = serde_json::json!({
+                                    "doc_id": doc.id,
+                                    "original_len": doc.original_len,
+                                    "num_patches": patch_lengths.len(),
+                                    "total_bytes": raw_bytes.len(),
+                                });
 
-                        // Save patches with entropies
-                        let filename = format!("item_{}.safetensors", doc.id);
-                        let path = args.output_dir.join(filename);
-                        save_patch_safetensors(
-                            &path,
-                            &raw_bytes,
-                            &patch_lengths,
-                            &entropies,
-                            Some(&metadata_db_name),
-                        )?;
+                                writer.add_sample(
+                                    &doc.id,
+                                    &raw_bytes,
+                                    &patch_lengths,
+                                    &entropies,
+                                    &metadata,
+                                )?;
+                            }
+                            None => {
+                                // SafeTensors format (default): individual files
+                                // Save metadata sidecar (hypergraph with patch nodes)
+                                let metadata_basename = format!("item_{}", doc.id);
+                                let metadata_path = args.output_dir.join(&metadata_basename);
+                                save_metadata_sidecar(&metadata_path, &sidecar, args.export_json_metadata)?;
+                                let metadata_db_name = format!("{}.hypergraph.db", metadata_basename);
+
+                                // Save patches with entropies
+                                let filename = format!("item_{}.safetensors", doc.id);
+                                let path = args.output_dir.join(filename);
+                                save_patch_safetensors(
+                                    &path,
+                                    &raw_bytes,
+                                    &patch_lengths,
+                                    &entropies,
+                                    Some(&metadata_db_name),
+                                )?;
+                            }
+                        }
                     }
                 }
                 Err(e) => println!("Error processing item {}: {}", doc.id, e),
             }
+        }
+
+        // Finalize WebDataset writer if used
+        if let Some(writer) = webdataset_writer {
+            let (total_samples, total_shards) = writer.finish()?;
+            println!(
+                "📦 WebDataset complete: {} samples in {} shards",
+                total_samples, total_shards
+            );
         }
 
         // Print batch statistics if requested

@@ -370,6 +370,32 @@ Contributions welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guideli
 --quant-stats           # Print quantization statistics and exit
 --prefetch-buffer N     # Documents to buffer ahead (default: 4)
 --batch-stats           # Print document size distribution
+--profile               # Enable CubeCL kernel profiling
+--entropy-histogram     # Export entropy distribution as JSON
+--output-format FORMAT  # Output format: safetensors (default) or webdataset
+```
+
+### Output Formats
+
+BLT-Burn supports two output formats:
+
+| Format | Description | Use Case |
+|--------|-------------|----------|
+| **SafeTensors** (default) | Individual `.safetensors` files with `.hypergraph.db` sidecars | Most use cases, random access |
+| **WebDataset** | Sharded `.tar.gz` archives | PyTorch DataLoader streaming |
+
+```bash
+# Default: SafeTensors output (recommended)
+cargo run --bin ingest -- --text "hello world"
+
+# Optional: WebDataset for PyTorch streaming
+cargo run --bin ingest -- --text "hello world" --output-format webdataset --webdataset-shard-size 1000
+```
+
+WebDataset shards are compatible with the PyTorch WebDataset loader:
+```python
+import webdataset as wds
+dataset = wds.WebDataset("output/shard_*.tar.gz").decode()
 ```
 
 **Version**: 0.5.0  

@@ -52,7 +52,8 @@ env/
 # Documentation builds
 docs/_build/
 site/
-
+OPTIMIZATION_GUIDE.md
+TODO.md
 # Generated caches and large binary artifacts
 **/.cache/
 *.hypergraph.db

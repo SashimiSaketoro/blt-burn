@@ -1001,10 +1001,70 @@ cargo run -- --external-drive /Volumes/MyDrive/blt_data --limit 1000
 | `--use-mpk` | Force MPK format | false |
 | `--threshold` | Entropy threshold | 1.35 |
 | `--output-dir` | Output directory | `ingest_output` |
+| `--output-format` | Output format: `safetensors` or `webdataset` | `safetensors` |
+| `--webdataset-shard-size` | Samples per WebDataset shard | 1000 |
 | `--cache-dir` | Dataset cache | `dataset_cache` |
 | `--external-drive` | External storage path | - |
 | `--limit` | Max items to process | All |
 | `--num-shards` | JAX sharding | Auto |
+| `--profile` | Enable CubeCL kernel profiling | false |
+| `--entropy-histogram` | Export entropy distribution as JSON | false |
+| `--histogram-output` | Entropy histogram output path | `entropy_histogram.json` |
+| `--histogram-bins` | Number of histogram bins | 50 |
+
+---
+
+## Output Formats
+
+BLT-Burn supports two output formats for ingested data:
+
+### SafeTensors (Default)
+
+The default format produces individual `.safetensors` files with paired `.hypergraph.db` sidecars:
+
+```bash
+cargo run --bin ingest -- --text "hello world" --output-dir output/
+# Produces:
+#   output/manual_input.safetensors
+#   output/manual_input.hypergraph.db
+```
+
+**Advantages:**
+- Random access to individual documents
+- Compact binary format
+- Direct JAX/NumPy loading via `safetensors` library
+- Paired hypergraph metadata for topology
+
+### WebDataset (Optional)
+
+For PyTorch streaming workloads, use WebDataset format:
+
+```bash
+cargo run --bin ingest -- --text "hello world" --output-format webdataset --webdataset-shard-size 1000
+# Produces:
+#   output/shard_000000.tar.gz
+#   output/shard_000001.tar.gz
+#   ...
+```
+
+**Advantages:**
+- Efficient PyTorch DataLoader streaming
+- Sharded for distributed training
+- Self-contained archives (no separate metadata files)
+
+**Usage in PyTorch:**
+```python
+import webdataset as wds
+
+dataset = wds.WebDataset("output/shard_*.tar.gz").decode()
+for sample in dataset:
+    bytes_data = sample[".safetensors"]  # Raw safetensors bytes
+    metadata = sample[".json"]           # Document metadata
+```
+
+Each sample in the WebDataset contains:
+- `{sample_id}.safetensors`: bytes, patch_lengths, entropies tensors
+- `{sample_id}.json`: document metadata (doc_id, original_len, num_patches)
 
 ---
 

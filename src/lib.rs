@@ -7,6 +7,7 @@ pub mod ffmpeg;
 pub mod generic_processor;
 pub mod huggingface_loader;
 pub mod model;
+pub mod output;
 pub mod patcher;
 pub mod polars_dataset_loader;
 pub mod polars_ext;
