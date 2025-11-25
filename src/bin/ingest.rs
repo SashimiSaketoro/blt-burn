@@ -1,18 +1,22 @@
 use blt_burn::{
+    batching::BatchStats,
     dataset::FineWebEduDataset,
     ffmpeg::{self, FfmpegError},
     model::{LMTransformer, LMTransformerConfig},
-    patcher::{patch_start_indices_cpu, patch_start_mask_from_entropy_with_monotonicity},
+    patcher::{patch_lengths_from_start_indices, patch_start_indices_cpu, patch_start_mask_from_entropy_with_monotonicity},
+    prefetch::DocumentPrefetcher,
     pretokenize::detect_modality,
-    sidecar::{EdgeData, HypergraphBuilder, HypergraphSidecar, NodeData, ShardingInfo},
+    quantization::{quantize_model, QuantConfig, QuantStats},
+    sidecar::{EdgeData, HypergraphBuilder, HypergraphSidecar, NodeData},
     tokenizer::BltTokenizer,
 };
 use burn::{
     backend::wgpu::{Wgpu, WgpuDevice},
     module::Module,
-    record::{HalfPrecisionSettings, NamedMpkFileRecorder, Recorder},
+    record::{FullPrecisionSettings, HalfPrecisionSettings, NamedMpkFileRecorder, Recorder},
     tensor::Tensor,
 };
+use burn_import::safetensors::SafetensorsFileRecorder;
 use clap::Parser;
 use dialoguer::Select;
 use hypergraph::VertexIndex;
@@ -23,7 +27,6 @@ use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-const MAX_TOKENS_PER_FILE: usize = 100_000; // Split large files into parts to prevent RAM explosion
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -36,13 +39,14 @@ struct Args {
     #[arg(short, long)]
     file: Option<PathBuf>,
 
-    /// Dataset subset
+    /// Dataset subset/configuration (e.g., "sample-10BT" for 10B token sample)
     #[arg(long, default_value = "sample-10BT")]
     subset: String,
 
-    /// Dataset split
+    /// HuggingFace partition name (required by HF API, usually "train" for full corpus)
+    /// Note: This is NOT a training split - we ingest the entire selected corpus
     #[arg(long, default_value = "train")]
-    split: String,
+    partition: String,
 
     /// Limit number of dataset items to process
     #[arg(long)]
@@ -60,9 +64,20 @@ struct Args {
     #[arg(short, long, default_value = "ingest_output")]
     output_dir: PathBuf,
 
-    /// Cache directory for dataset download (default: dataset_cache)
-    #[arg(long, default_value = "dataset_cache")]
-    cache_dir: String,
+    /// Base directory for burn's SQLite database
+    /// Defaults to ~/.cache/huggingface/blt-burn (same drive as HF cache, respects symlinks)
+    #[arg(long)]
+    base_dir: Option<String>,
+
+    /// Override HuggingFace cache directory (default: uses ~/.cache/huggingface symlink)
+    /// Only set this if you want to override the system's default HF cache location
+    #[arg(long)]
+    hf_cache: Option<String>,
+
+    /// External drive path for output files only
+    /// HF downloads still use system cache (respects symlinks like ~/.cache/huggingface -> /Volumes/ai/)
+    #[arg(long)]
+    external_drive: Option<String>,
 
     /// Number of shards to split output into (for JAX distributed loading)
     #[arg(long)]
@@ -99,6 +114,29 @@ struct Args {
     /// Export hypergraph sidecar as JSON for debugging (in addition to SQLite)
     #[arg(long)]
     export_json: bool,
+
+    /// Force loading model weights from MPK format instead of SafeTensors
+    #[arg(long)]
+    use_mpk: bool,
+
+    /// Quantization mode for model weights: none (default), int8, int4
+    /// INT8 provides ~2x speedup with minimal accuracy loss
+    /// INT4 provides ~4x compression but may affect embedding quality
+    #[arg(long, default_value = "none")]
+    quantize: String,
+
+    /// Print quantization statistics and exit
+    #[arg(long)]
+    quant_stats: bool,
+
+    /// Number of documents to prefetch in background (default: 4)
+    /// Higher values use more memory but reduce GPU stalls
+    #[arg(long, default_value_t = 4)]
+    prefetch_buffer: usize,
+
+    /// Print document size distribution statistics
+    #[arg(long)]
+    batch_stats: bool,
 }
 
 fn compute_hash(data: &[u8]) -> String {
@@ -186,6 +224,13 @@ fn ensure_ffmpeg_interactive(args: &Args) -> Result<(bool, Option<PathBuf>), any
     }
 }
 
+/// Process raw bytes through BLT entropy model to compute patch boundaries.
+/// 
+/// Returns:
+/// - Raw bytes (unchanged input)
+/// - Patch lengths (computed via entropy-based boundary detection)
+/// - Per-byte entropies (for downstream Orch-OR/lasing mode)
+/// - Hypergraph sidecar (metadata)
 fn process_data(
     data: &[u8],
     model: &LMTransformer<Wgpu>,
@@ -193,13 +238,9 @@ fn process_data(
     threshold: f64,
 ) -> Result<
     (
-        Vec<f32>,
-        Vec<f32>,
-        Vec<f32>,
-        Vec<f32>,
-        Vec<i32>,
-        Vec<i32>,
-        usize,
+        Vec<u8>,    // raw bytes (unchanged)
+        Vec<i32>,   // patch_lengths
+        Vec<f32>,   // entropies (per-byte, for downstream aggregation)
         HypergraphSidecar,
     ),
     anyhow::Error,
@@ -232,13 +273,9 @@ fn process_data(
             total_bytes: 0,
         });
         return Ok((
-            Vec::<f32>::new(),
-            Vec::<f32>::new(),
-            Vec::<f32>::new(),
-            Vec::<f32>::new(),
-            Vec::<i32>::new(),
-            Vec::<i32>::new(),
-            0,
+            Vec::<u8>::new(),    // raw bytes
+            Vec::<i32>::new(),   // patch_lengths
+            Vec::<f32>::new(),   // entropies
             builder.build(),
         ));
     }
@@ -266,9 +303,13 @@ fn process_data(
 
     // --- End Hypergraph Builder ---
 
-    let chunk_size = 1024;
-    let stride = 512; // Process 512 new tokens per chunk, keeping 512 as context
-    let context_size = chunk_size - stride; // 512 tokens of context
+    // BLT entropy model config: max_seqlen=8192, sliding_window=512
+    // Use larger chunks to minimize "seam" artifacts at boundaries
+    // Each token attends to previous 512 (local attention), but larger chunks
+    // reduce discontinuities and allow better model state buildup
+    let chunk_size = 4096;  // Half of max_seqlen for memory safety
+    let context_overlap = 512;  // Match the sliding_window size
+    let stride = chunk_size - context_overlap;  // New tokens per chunk
 
     let mut chunk_entropies_list = Vec::new();
     let mut chunk_norms_list = Vec::new();
@@ -280,14 +321,14 @@ fn process_data(
         let start = if position == 0 {
             0
         } else {
-            position - context_size
+            position - context_overlap
         };
         let end = (position + stride).min(tokens_vec.len());
         let chunk = &tokens_vec[start..end];
         let chunk_len = chunk.len();
 
         // Skip index to ignore low-context outputs at the beginning of non-first chunks
-        let skip_count = if position == 0 { 0 } else { context_size };
+        let skip_count = if position == 0 { 0 } else { context_overlap };
 
         let input =
             Tensor::<Wgpu, 1, burn::tensor::Int>::from_ints(chunk, device).reshape([1, chunk_len]);
@@ -296,17 +337,15 @@ fn process_data(
         let chunk_entropies = blt_burn::patcher::entropy(output.logits);
 
         // Extract only the valid portion (skip context that was already processed)
+        // Note: No .clone() needed here - tensors are consumed by slice and not used after
         if skip_count > 0 {
-            let valid_entropies = chunk_entropies.clone().slice([0..1, skip_count..chunk_len]);
+            let valid_entropies = chunk_entropies.slice([0..1, skip_count..chunk_len]);
             let valid_norms = output
                 .embedding_norms
-                .clone()
                 .slice([0..1, skip_count..chunk_len]);
-            let valid_embeddings =
-                output
-                    .pre_norm_embeddings
-                    .clone()
-                    .slice([0..1, skip_count..chunk_len, 0..768]);
+            let valid_embeddings = output
+                .pre_norm_embeddings
+                .slice([0..1, skip_count..chunk_len, 0..768]);
 
             chunk_entropies_list.push(valid_entropies);
             chunk_norms_list.push(valid_norms);
@@ -338,8 +377,8 @@ fn process_data(
     let entropies_data = entropies.into_data();
     let coherence_data = coherence_scores.into_data();
 
-    let embeddings_f32: Vec<f32> = embeddings_data.iter::<f32>().collect();
-    let norms_f32: Vec<f32> = norms_data.iter::<f32>().collect();
+    let _embeddings_f32: Vec<f32> = embeddings_data.iter::<f32>().collect();
+    let _norms_f32: Vec<f32> = norms_data.iter::<f32>().collect();
     let entropies_f32: Vec<f32> = entropies_data.iter::<f32>().collect();
     let coherence_f32: Vec<f32> = coherence_data.iter::<f32>().collect();
 
@@ -356,49 +395,66 @@ fn process_data(
         }
     }
 
-    let patch_indices_i32: Vec<i32> = patch_indices_inner.iter().map(|&x| x as i32).collect();
+    let _patch_indices_i32: Vec<i32> = patch_indices_inner.iter().map(|&x| x as i32).collect();
+    
+    // Compute patch lengths from indices
+    let patch_lengths = patch_lengths_from_start_indices(&patch_indices, total_tokens);
+    let patch_lengths_i32: Vec<i32> = if !patch_lengths.is_empty() {
+        patch_lengths[0].iter().map(|&x| x as i32).collect()
+    } else {
+        vec![]
+    };
 
-    // D. Process Segments (Leaves) with Coherence Injection
-    // Move Hypergraph construction here to access computed coherence scores
+    // D. Build Patch Leaves from entropy boundaries (not pre-tokenized segments)
+    // Each patch becomes a leaf node with coherence score
     let mut prev_leaf_idx: Option<VertexIndex> = None;
-    let mut token_offset = 0;
+    let mut byte_offset = 0;
 
-    for segment in segments {
-        let mut seg = segment.clone();
-        let len = seg.bytes.len();
-        let start = token_offset;
-        let end = token_offset + len;
+    for (patch_idx, &patch_len) in patch_lengths_i32.iter().enumerate() {
+        let len = patch_len as usize;
+        let start = byte_offset;
+        let end = byte_offset + len;
 
-        // Calculate mean coherence for this segment
-        if end <= coherence_f32.len() {
-            let segment_coherence: f32 =
-                coherence_f32[start..end].iter().sum::<f32>() / (len.max(1) as f32);
+        // Extract patch bytes
+        let patch_bytes = if end <= data.len() {
+            data[start..end].to_vec()
+        } else {
+            data[start..].to_vec()
+        };
 
-            // Inject into metadata
-            if let Some(meta) = &mut seg.metadata {
-                let mut extra = meta.extra.clone().unwrap_or(serde_json::json!({}));
-                if let Some(obj) = extra.as_object_mut() {
-                    obj.insert(
-                        "coherence_score".to_string(),
-                        serde_json::json!(segment_coherence),
-                    );
-                }
-                meta.extra = Some(extra);
-            } else {
-                // Create metadata if missing
-                seg.metadata = Some(blt_burn::pretokenize::SegmentMetadata {
-                    start_offset: start,
-                    end_offset: end,
-                    confidence: 1.0,
-                    extra: Some(serde_json::json!({
-                        "coherence_score": segment_coherence
-                    })),
-                });
-            }
-        }
-        token_offset = end;
+        // Calculate mean coherence and entropy for this patch
+        let patch_coherence: f32 = if end <= coherence_f32.len() {
+            coherence_f32[start..end].iter().sum::<f32>() / (len.max(1) as f32)
+        } else {
+            0.0
+        };
+        
+        let patch_entropy: f32 = if end <= entropies_f32.len() {
+            entropies_f32[start..end].iter().sum::<f32>() / (len.max(1) as f32)
+        } else {
+            0.0
+        };
 
-        // Add Leaf Node
+        // Create segment with patch metadata
+        let seg = blt_burn::pretokenize::ByteSegment {
+            bytes: patch_bytes,
+            label: Some(format!("patch_{}", patch_idx)),
+            metadata: Some(blt_burn::pretokenize::SegmentMetadata {
+                start_offset: start,
+                end_offset: end,
+                confidence: 1.0,
+                extra: Some(serde_json::json!({
+                    "patch_index": patch_idx,
+                    "patch_length": len,
+                    "coherence_score": patch_coherence,
+                    "mean_entropy": patch_entropy,
+                })),
+            }),
+        };
+
+        byte_offset = end;
+
+        // Add Leaf Node (one per patch)
         let leaf_idx = builder.add_node(NodeData::Leaf(seg));
 
         // Connect Branch -> Leaf (Containment)
@@ -425,14 +481,11 @@ fn process_data(
     }
     // --- End Hypergraph Builder ---
 
+    // Return raw bytes, patch lengths, and entropies
     Ok((
-        embeddings_f32,
-        norms_f32,
-        entropies_f32,
-        coherence_f32,
-        patch_indices_i32,
-        patch_mask_vec,
-        total_tokens,
+        data.to_vec(),       // raw bytes (unchanged)
+        patch_lengths_i32,   // length of each patch
+        entropies_f32,       // per-byte entropies for downstream Orch-OR
         builder.build(),
     ))
 }
@@ -455,173 +508,79 @@ fn save_metadata_sidecar(
     Ok(())
 }
 
-fn save_sharded_output(
-    base_path: &Path,
-    embeddings_f32: &[f32],
-    norms_f32: &[f32],
-    entropies_f32: &[f32],
-    coherence_f32: &[f32],
-    patch_indices_i32: &[i32],
-    patch_mask_vec: &[i32],
-    total_tokens: usize,
-    sidecar: HypergraphSidecar,
-    num_shards: usize,
-    export_json: bool,
-) -> anyhow::Result<()> {
-    if num_shards == 1 {
-        // Single shard - use regular save
-        save_safetensors(
-            base_path,
-            embeddings_f32,
-            norms_f32,
-            entropies_f32,
-            coherence_f32,
-            patch_indices_i32,
-            patch_mask_vec,
-            total_tokens,
-            None,
-        )?;
-        save_metadata_sidecar(&base_path.with_extension(""), &sidecar, export_json)?;
-        return Ok(());
-    }
-
-    // Calculate tokens per shard
-    let tokens_per_shard = (total_tokens + num_shards - 1) / num_shards;
-    let embedding_dim = 768;
-
-    for shard_idx in 0..num_shards {
-        let start_token = shard_idx * tokens_per_shard;
-        let end_token = ((shard_idx + 1) * tokens_per_shard).min(total_tokens);
-        let shard_tokens = end_token - start_token;
-
-        if shard_tokens == 0 {
-            continue;
-        }
-
-        // Extract shard data
-        let emb_start = start_token * embedding_dim;
-        let emb_end = end_token * embedding_dim;
-
-        // Create sharding info
-        let sharding_info = ShardingInfo {
-            global_shape: vec![1, total_tokens, embedding_dim],
-            shard_index: shard_idx,
-            num_shards,
-            process_index: Some(shard_idx % num_shards), // Simple round-robin assignment
-            axis: 1,                                     // Sharding along sequence dimension
-        };
-
-        // Update sidecar with sharding info
-        let mut shard_sidecar = sidecar.clone();
-        shard_sidecar.sharding = Some(sharding_info);
-
-        // Generate shard filename
-        let shard_name = format!(
-            "{}_shard_{}_of_{}",
-            base_path.file_stem().unwrap_or_default().to_string_lossy(),
-            shard_idx,
-            num_shards
-        );
-        let shard_path = base_path
-            .with_file_name(&shard_name)
-            .with_extension("safetensors");
-
-        // Save shard
-        save_safetensors(
-            &shard_path,
-            &embeddings_f32[emb_start..emb_end],
-            &norms_f32[start_token..end_token],
-            &entropies_f32[start_token..end_token],
-            &coherence_f32[start_token..end_token],
-            patch_indices_i32, // Keep all patch indices for reference
-            &patch_mask_vec[start_token..end_token],
-            shard_tokens,
-            Some(&format!("{}.hypergraph.db", shard_name)),
-        )?;
-
-        // Save shard metadata
-        let shard_base = base_path.with_file_name(&shard_name);
-        save_metadata_sidecar(&shard_base, &shard_sidecar, export_json)?;
-    }
-
-    Ok(())
-}
-
-fn save_safetensors(
+/// Save byte patches with entropies to safetensors format.
+/// 
+/// Output format:
+/// - `bytes`: [total_bytes] - raw byte values (0-255) concatenated
+/// - `patch_lengths`: [num_patches] - length of each patch
+/// - `entropies`: [total_bytes] - per-byte entropy values for downstream Orch-OR
+/// 
+/// To reconstruct patches in Python:
+/// ```python
+/// patches = []
+/// offset = 0
+/// for length in patch_lengths:
+///     patches.append(bytes(byte_data[offset:offset+length]))
+///     offset += length
+/// ```
+/// 
+/// To aggregate entropies to patch level:
+/// ```python
+/// patch_entropies = []
+/// offset = 0
+/// for length in patch_lengths:
+///     patch_entropies.append(entropies[offset:offset+length].mean())
+///     offset += length
+/// ```
+fn save_patch_safetensors(
     path: &Path,
-    embeddings_f32: &[f32],
-    norms_f32: &[f32],
-    entropies_f32: &[f32],
-    coherence_f32: &[f32],
-    patch_indices_i32: &[i32],
-    patch_mask_vec: &[i32],
-    total_tokens: usize,
+    bytes: &[u8],
+    patch_lengths: &[i32],
+    entropies: &[f32],
     metadata_filename: Option<&str>,
 ) -> anyhow::Result<()> {
-    // Safety rail: Don't create empty files
-    if total_tokens == 0 {
-        println!("Warning: Skipping save_safetensors - no tokens to save");
+    if bytes.is_empty() {
+        println!("Warning: Skipping save - no bytes to save");
         return Ok(());
     }
+
+    let num_patches = patch_lengths.len();
+    println!("  Saving {} bytes in {} patches", bytes.len(), num_patches);
 
     let tensors: Vec<(&str, TensorView)> = vec![
         (
-            "embeddings",
+            "bytes",
             TensorView::new(
-                Dtype::F32,
-                vec![1, total_tokens, 768],
-                bytemuck::cast_slice(embeddings_f32),
+                Dtype::U8,
+                vec![bytes.len()],
+                bytes,
             )
-            .map_err(|e| anyhow::anyhow!("Failed to create embeddings tensor view: {}", e))?,
+            .map_err(|e| anyhow::anyhow!("Failed to create bytes tensor: {}", e))?,
         ),
         (
-            "prominence",
+            "patch_lengths",
             TensorView::new(
-                Dtype::F32,
-                vec![1, total_tokens],
-                bytemuck::cast_slice(norms_f32),
+                Dtype::I32,
+                vec![num_patches],
+                bytemuck::cast_slice(patch_lengths),
             )
-            .map_err(|e| anyhow::anyhow!("Failed to create prominence tensor view: {}", e))?,
+            .map_err(|e| anyhow::anyhow!("Failed to create patch_lengths tensor: {}", e))?,
         ),
         (
             "entropies",
             TensorView::new(
                 Dtype::F32,
-                vec![1, total_tokens],
-                bytemuck::cast_slice(entropies_f32),
+                vec![entropies.len()],
+                bytemuck::cast_slice(entropies),
             )
-            .map_err(|e| anyhow::anyhow!("Failed to create entropies tensor view: {}", e))?,
-        ),
-        (
-            "coherence_scores",
-            TensorView::new(
-                Dtype::F32,
-                vec![1, total_tokens],
-                bytemuck::cast_slice(coherence_f32),
-            )
-            .map_err(|e| anyhow::anyhow!("Failed to create coherence_scores tensor view: {}", e))?,
-        ),
-        (
-            "patch_indices",
-            TensorView::new(
-                Dtype::I32,
-                vec![patch_indices_i32.len()],
-                bytemuck::cast_slice(patch_indices_i32),
-            )
-            .map_err(|e| anyhow::anyhow!("Failed to create patch_indices tensor view: {}", e))?,
-        ),
-        (
-            "patch_mask",
-            TensorView::new(
-                Dtype::I32,
-                vec![1, total_tokens],
-                bytemuck::cast_slice(patch_mask_vec),
-            )
-            .map_err(|e| anyhow::anyhow!("Failed to create patch_mask tensor view: {}", e))?,
+            .map_err(|e| anyhow::anyhow!("Failed to create entropies tensor: {}", e))?,
         ),
     ];
 
     let mut metadata_map = std::collections::HashMap::new();
+    metadata_map.insert("format".to_string(), "blt_patches_v2".to_string());
+    metadata_map.insert("num_patches".to_string(), num_patches.to_string());
+    metadata_map.insert("total_bytes".to_string(), bytes.len().to_string());
     if let Some(mf) = metadata_filename {
         metadata_map.insert("metadata_file".to_string(), mf.to_string());
     }
@@ -632,13 +591,59 @@ fn save_safetensors(
     Ok(())
 }
 
+fn get_default_base_dir() -> String {
+    // Use ~/.cache/huggingface/blt-burn as default (same drive as HF cache, respects symlinks)
+    if let Ok(home) = std::env::var("HOME") {
+        let hf_cache = PathBuf::from(&home).join(".cache/huggingface/blt-burn");
+        return hf_cache.to_string_lossy().to_string();
+    }
+    // Fallback to local directory
+    "dataset_cache".to_string()
+}
+
 fn main() -> anyhow::Result<()> {
-    let args = Args::parse();
+    let mut args = Args::parse();
+    
+    // Compute default base_dir if not provided (uses HF cache location)
+    let base_dir = args.base_dir.clone().unwrap_or_else(get_default_base_dir);
+
+    // Handle external drive override
+    if let Some(ref external_drive) = args.external_drive {
+        let external_path = PathBuf::from(external_drive);
+        
+        // Verify the external drive exists and is writable
+        if !external_path.exists() {
+            println!("📁 Creating external drive directory: {}", external_path.display());
+            fs::create_dir_all(&external_path)?;
+        }
+        
+        // Test write access
+        let test_file = external_path.join(".blt_write_test");
+        match fs::write(&test_file, "test") {
+            Ok(_) => {
+                fs::remove_file(&test_file).ok();
+                println!("✅ External drive verified: {}", external_path.display());
+            }
+            Err(e) => {
+                anyhow::bail!("Cannot write to external drive {}: {}", external_path.display(), e);
+            }
+        }
+        
+        // External drive is for OUTPUT only - HF downloads use system cache (respects symlinks)
+        args.output_dir = external_path.join("output");
+        println!("📂 HF Cache: system default (respects ~/.cache/huggingface symlink)");
+        println!("📂 Base directory: {}", base_dir);
+        println!("📂 Output directory: {}", args.output_dir.display());
+    }
+    
+    // Show base directory location
+    println!("📂 Base directory: {} (for burn SQLite DB)", base_dir);
 
     // Check FFmpeg availability
     let (_av_enabled, _ffmpeg_path) = ensure_ffmpeg_interactive(&args)?;
 
     let device = WgpuDevice::default();
+    // With "fusion" feature enabled, Wgpu automatically uses kernel fusion
     type Backend = Wgpu;
 
     // Initialize Model
@@ -656,20 +661,61 @@ fn main() -> anyhow::Result<()> {
         vocab_size: 260,
     };
     let model = config.init::<Backend>(&device);
-    let recorder = NamedMpkFileRecorder::<HalfPrecisionSettings>::default();
 
     // Determine model path: argument > build-time env var > default local
     let model_path = args
         .model_path
+        .clone()
+        .or_else(|| option_env!("BLT_MODEL_SAFETENSORS_PATH").map(PathBuf::from))
         .or_else(|| option_env!("BLT_MODEL_CACHE_PATH").map(PathBuf::from))
-        .unwrap_or_else(|| PathBuf::from("blt_entropy_model.mpk"));
+        .unwrap_or_else(|| PathBuf::from("model.safetensors"));
 
     println!("Loading weights from {:?}", model_path);
-    let model = model.load_record(
-        recorder
-            .load(model_path.into(), &device)
-            .expect("Failed to load weights"),
-    );
+
+    // Determine format from path extension or --use-mpk flag
+    let use_mpk = args.use_mpk
+        || model_path
+            .extension()
+            .map(|e| e == "mpk")
+            .unwrap_or(false);
+
+    let model = if use_mpk {
+        println!("Using MPK format (NamedMpkFileRecorder)");
+        let recorder = NamedMpkFileRecorder::<HalfPrecisionSettings>::default();
+        model.load_record(
+            recorder
+                .load(model_path.into(), &device)
+                .expect("Failed to load MPK weights"),
+        )
+    } else {
+        println!("Using SafeTensors format (SafetensorsFileRecorder)");
+        let recorder = SafetensorsFileRecorder::<FullPrecisionSettings>::default();
+        model.load_record(
+            recorder
+                .load(model_path.into(), &device)
+                .expect("Failed to load SafeTensors weights"),
+        )
+    };
+
+    // Parse quantization configuration
+    let quant_config = QuantConfig::from_str(&args.quantize);
+    
+    // Handle --quant-stats flag: print stats and exit
+    if args.quant_stats {
+        QuantStats::for_blt_model(quant_config).print();
+        return Ok(());
+    }
+    
+    // Apply quantization if requested
+    let model = if quant_config.is_enabled() {
+        println!("🔢 Quantizing model to {}...", quant_config);
+        let start = std::time::Instant::now();
+        let quantized = quantize_model(model, quant_config);
+        println!("   ✅ Quantization complete in {:?}", start.elapsed());
+        quantized
+    } else {
+        model
+    };
 
     // Create output directory
     fs::create_dir_all(&args.output_dir).expect("Failed to create output directory");
@@ -714,150 +760,130 @@ fn main() -> anyhow::Result<()> {
 
         println!("Processing single input ({} bytes)...", bytes.len());
         match process_data(&bytes, &model, &device, args.threshold) {
-            Ok((emb, norms, entropies, coherence, idxs, mask, count, sidecar)) => {
-                // Determine sharding strategy
-                let num_shards = if let Some(n) = args.num_shards {
-                    n
-                } else if count > args.shard_size {
-                    // Auto-shard based on size
-                    (count + args.shard_size - 1) / args.shard_size
-                } else {
-                    1
-                };
-
-                if num_shards > 1 {
-                    println!(
-                        "📦 Sharding output into {} shards (JAX-compatible)...",
-                        num_shards
-                    );
-                    save_sharded_output(
-                        &args.output_dir.join(&filename_prefix),
-                        &emb,
-                        &norms,
-                        &entropies,
-                        &coherence,
-                        &idxs,
-                        &mask,
-                        count,
-                        sidecar,
-                        num_shards,
-                        args.export_json_metadata,
-                    )?;
-                    println!(
-                        "✅ Saved {} shards with pattern: {}_shard_*_of_{}.safetensors",
-                        num_shards, filename_prefix, num_shards
-                    );
-                } else {
-                    // Single output
+            Ok((raw_bytes, patch_lengths, entropies, sidecar)) => {
+                if !patch_lengths.is_empty() {
+                    // Save metadata sidecar
                     let metadata_basename = filename_prefix.clone();
                     let metadata_path = args.output_dir.join(&metadata_basename);
                     save_metadata_sidecar(&metadata_path, &sidecar, args.export_json_metadata)?;
                     let metadata_db_name = format!("{}.hypergraph.db", metadata_basename);
 
+                    // Save patches with entropies
                     let path = args
                         .output_dir
                         .join(format!("{}.safetensors", filename_prefix));
-                    save_safetensors(
+                    save_patch_safetensors(
                         &path,
-                        &emb,
-                        &norms,
+                        &raw_bytes,
+                        &patch_lengths,
                         &entropies,
-                        &coherence,
-                        &idxs,
-                        &mask,
-                        count,
                         Some(&metadata_db_name),
                     )?;
-                    println!("✅ Saved: {}", path.display());
+                    println!("✅ Saved: {} ({} patches)", path.display(), patch_lengths.len());
                 }
             }
             Err(e) => println!("Error processing input: {}", e),
         }
     } else {
-        // Dataset mode (default)
+        // Dataset ingestion mode (default) - processes entire corpus, NOT training splits
         println!(
-            "Loading FineWeb-Edu dataset ({}/{})...",
-            args.subset, args.split
+            "📚 Ingesting FineWeb-Edu corpus: {} (full {} partition)...",
+            args.subset, args.partition
         );
-        println!("Cache directory: {}", args.cache_dir);
-        fs::create_dir_all(&args.cache_dir).expect("Failed to create cache directory");
+        if let Some(ref hf_cache) = args.hf_cache {
+            println!("HF Cache override: {}", hf_cache);
+        } else {
+            println!("HF Cache: system default (respects symlinks)");
+        }
+        fs::create_dir_all(&base_dir).expect("Failed to create base directory");
 
-        let dataset = FineWebEduDataset::new(&args.subset, &args.split, &args.cache_dir)
+        let dataset = FineWebEduDataset::new(&args.subset, &args.partition, &base_dir, args.hf_cache.as_deref())
             .expect("Failed to load dataset");
 
         println!("Dataset size: {}", dataset.len());
         let limit = args.limit.unwrap_or(dataset.len());
 
-        for (i, item) in dataset.iter().take(limit).enumerate() {
-            let id_str = item.id.clone().unwrap_or_else(|| format!("{}", i));
-            println!("Processing item {}/{} (ID: {})...", i + 1, limit, id_str);
+        // Collect document references into owned data for prefetcher
+        // The prefetcher spawns a thread, so it needs 'static lifetime
+        println!("📥 Loading document metadata...");
+        let docs: Vec<(String, Vec<u8>)> = dataset
+            .iter()
+            .take(limit)
+            .enumerate()
+            .filter_map(|(i, item)| {
+                let id_str = item.id.clone().unwrap_or_else(|| format!("{}", i));
+                if item.text.is_empty() {
+                    None
+                } else {
+                    Some((id_str, item.text.into_bytes()))
+                }
+            })
+            .collect();
+        
+        println!("📋 Collected {} documents for processing", docs.len());
 
-            // Skip empty
-            if item.text.is_empty() {
-                continue;
+        // Use async prefetcher - loads next docs while GPU processes current
+        // This overlaps I/O with compute per Burn's async execution model
+        println!("🚀 Async prefetch enabled (buffer: {} docs)", args.prefetch_buffer);
+        let prefetcher = DocumentPrefetcher::new(docs.into_iter(), args.prefetch_buffer);
+        
+        let mut batch_stats = BatchStats::default();
+        let mut processed = 0;
+        let start_time = std::time::Instant::now();
+
+        for doc in prefetcher {
+            processed += 1;
+            batch_stats.add(&doc);
+            
+            // Progress logging
+            if processed % 100 == 0 || processed <= 10 {
+                let elapsed = start_time.elapsed().as_secs_f64();
+                let rate = processed as f64 / elapsed;
+                println!(
+                    "Processing {}/{} (ID: {}, {} bytes) [{:.1} docs/s]",
+                    processed, limit, doc.id, doc.original_len, rate
+                );
             }
 
-            let bytes = item.text.into_bytes();
-            match process_data(&bytes, &model, &device, args.threshold) {
-                Ok((emb, norms, entropies, coherence, idxs, mask, count, sidecar)) => {
-                    if count > 0 {
-                        // Save metadata sidecar (one per item)
-                        let metadata_basename = format!("item_{}", id_str);
+            // Process document - each doc gets its own hypergraph sidecar
+            // This preserves entropy context integrity (no cross-doc bleeding)
+            match process_data(&doc.bytes, &model, &device, args.threshold) {
+                Ok((raw_bytes, patch_lengths, entropies, sidecar)) => {
+                    if !patch_lengths.is_empty() {
+                        // Save metadata sidecar (hypergraph with patch nodes)
+                        let metadata_basename = format!("item_{}", doc.id);
                         let metadata_path = args.output_dir.join(&metadata_basename);
                         save_metadata_sidecar(&metadata_path, &sidecar, args.export_json_metadata)?;
-                        let metadata_db_name = format!("item_{}.hypergraph.db", id_str);
+                        let metadata_db_name = format!("{}.hypergraph.db", metadata_basename);
 
-                        // Split into parts if too large to prevent RAM issues
-                        let parts = (count + MAX_TOKENS_PER_FILE - 1) / MAX_TOKENS_PER_FILE;
-
-                        if parts == 1 {
-                            // Single file
-                            let filename = format!("item_{}.safetensors", id_str);
-                            let path = args.output_dir.join(filename);
-                            save_safetensors(
-                                &path,
-                                &emb,
-                                &norms,
-                                &entropies,
-                                &coherence,
-                                &idxs,
-                                &mask,
-                                count,
-                                Some(&metadata_db_name),
-                            )?;
-                        } else {
-                            // Split into multiple parts
-                            for part in 0..parts {
-                                let start = part * MAX_TOKENS_PER_FILE;
-                                let end = ((part + 1) * MAX_TOKENS_PER_FILE).min(count);
-                                let part_tokens = end - start;
-
-                                // Extract ranges for this part
-                                let emb_start = start * 768;
-                                let emb_end = end * 768;
-
-                                let filename = format!("item_{}_part_{}.safetensors", id_str, part);
-                                let path = args.output_dir.join(filename);
-
-                                // Create slices for this part
-                                save_safetensors(
-                                    &path,
-                                    &emb[emb_start..emb_end],
-                                    &norms[start..end],
-                                    &entropies[start..end],
-                                    &coherence[start..end],
-                                    &idxs, // Keep all patch indices for context
-                                    &mask[start..end],
-                                    part_tokens,
-                                    Some(&metadata_db_name),
-                                )?;
-                            }
-                        }
+                        // Save patches with entropies
+                        let filename = format!("item_{}.safetensors", doc.id);
+                        let path = args.output_dir.join(filename);
+                        save_patch_safetensors(
+                            &path,
+                            &raw_bytes,
+                            &patch_lengths,
+                            &entropies,
+                            Some(&metadata_db_name),
+                        )?;
                     }
                 }
-                Err(e) => println!("Error processing item {}: {}", id_str, e),
+                Err(e) => println!("Error processing item {}: {}", doc.id, e),
             }
         }
+
+        // Print batch statistics if requested
+        if args.batch_stats {
+            batch_stats.print_summary();
+        }
+        
+        let total_time = start_time.elapsed();
+        println!(
+            "📊 Processed {} docs in {:.1}s ({:.1} docs/s)",
+            processed,
+            total_time.as_secs_f64(),
+            processed as f64 / total_time.as_secs_f64()
+        );
     }
 
     println!("✅ Ingestion complete!");
@@ -866,8 +892,7 @@ fn main() -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use blt_burn::pretokenize::{Segment, SegmentMetadata};
+    use blt_burn::pretokenize::{ByteSegment, SegmentMetadata};
     use serde_json::json;
 
     #[test]
@@ -879,8 +904,9 @@ mod tests {
         let end = 5;
 
         // Simulate segment creation (mock bytes and metadata)
-        let mut seg = Segment {
+        let mut seg = ByteSegment {
             bytes: vec![0u8; len],
+            label: None,
             metadata: Some(SegmentMetadata {
                 start_offset: start,
                 end_offset: end,
@@ -892,7 +918,7 @@ mod tests {
         // Manually inject coherence (as done in process_data)
         if end <= coherence_f32.len() {
             let segment_coherence: f32 = coherence_f32[start..end].iter().sum::<f32>() / (len as f32);
-            let expected_coherence = 1.1; // (0.8+1.2+0.9+1.5+1.1)/5 = 1.1
+            let expected_coherence: f32 = 1.1; // (0.8+1.2+0.9+1.5+1.1)/5 = 1.1
 
             if let Some(meta) = &mut seg.metadata {
                 let mut extra = meta.extra.clone().unwrap_or(json!({}));
@@ -917,16 +943,17 @@ mod tests {
         let len = 2;
         let start = 0;
         let end = 2;
+        let expected_coherence: f32 = 1.5;
 
-        let mut seg = Segment {
+        let mut seg = ByteSegment {
             bytes: vec![0u8; len],
+            label: None,
             metadata: None, // No initial metadata
         };
 
         // Inject coherence
         if end <= coherence_f32.len() {
             let segment_coherence: f32 = coherence_f32[start..end].iter().sum::<f32>() / (len as f32);
-            let expected_coherence = 1.5;
 
             seg.metadata = Some(SegmentMetadata {
                 start_offset: start,

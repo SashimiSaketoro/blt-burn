@@ -9,6 +9,7 @@ use burn::{
     record::{FullPrecisionSettings, NamedMpkFileRecorder, Recorder},
     tensor::Tensor,
 };
+use burn_import::safetensors::SafetensorsFileRecorder;
 use clap::Parser;
 use safetensors::serialize;
 use safetensors::tensor::{Dtype, TensorView};
@@ -27,9 +28,13 @@ struct Args {
     #[arg(short, long)]
     file: Option<PathBuf>,
 
-    /// Path to model weights (Burn binary format)
+    /// Path to model weights (.safetensors or .mpk format)
     #[arg(short, long)]
     model_path: Option<PathBuf>,
+
+    /// Force using .mpk format instead of safetensors
+    #[arg(long, default_value_t = false)]
+    use_mpk: bool,
 
     /// Entropy threshold
     #[arg(short = 'r', long, default_value_t = 1.35)]
@@ -43,11 +48,42 @@ struct Args {
 fn main() {
     let args = Args::parse();
 
-    // Determine model path: argument > build-time env var > default local
-    let model_path = args
-        .model_path
-        .or_else(|| option_env!("BLT_MODEL_CACHE_PATH").map(PathBuf::from))
-        .unwrap_or_else(|| PathBuf::from("blt_entropy_model.mpk"));
+    // Determine model path and format
+    // Priority: CLI arg > safetensors env var > mpk env var > default
+    let (model_path, use_safetensors) = if let Some(path) = args.model_path {
+        let is_safetensors = path.extension().map(|e| e == "safetensors").unwrap_or(false);
+        (path, is_safetensors && !args.use_mpk)
+    } else if let Some(path) = option_env!("BLT_MODEL_SAFETENSORS_PATH") {
+        (PathBuf::from(path), true)
+    } else if let Some(path) = option_env!("BLT_MODEL_CACHE_PATH") {
+        (PathBuf::from(path), false)
+    } else {
+        // Default to looking for safetensors in HF cache
+        let home = std::env::var("HOME").unwrap_or_default();
+        let hf_path = PathBuf::from(&home)
+            .join(".cache/huggingface/hub/models--facebook--blt-entropy/snapshots");
+        
+        let mut found_path: Option<PathBuf> = None;
+        if hf_path.exists() {
+            if let Ok(entries) = std::fs::read_dir(&hf_path) {
+                for entry in entries.flatten() {
+                    let model_path = entry.path().join("model.safetensors");
+                    if model_path.exists() {
+                        println!("Found Facebook BLT entropy model in HF cache");
+                        found_path = Some(model_path);
+                        break;
+                    }
+                }
+            }
+        }
+        
+        if let Some(path) = found_path {
+            (path, true)
+        } else {
+            // Fallback to mpk
+            (PathBuf::from("blt_entropy_model.mpk"), false)
+        }
+    };
 
     let text = if let Some(t) = args.text {
         t
@@ -84,16 +120,26 @@ fn main() {
 
     let model = config.init::<Backend>(&device);
 
-    // Load weights from .mpk file
-    println!("Loading weights from {:?}", model_path);
-    let recorder = NamedMpkFileRecorder::<FullPrecisionSettings>::default();
-    let model = model.load_record(
-        recorder
-            .load(model_path.clone().into(), &device)
-            .expect("Failed to load weights"),
-    );
+    // Load weights from safetensors or mpk file
+    println!("Loading weights from {:?} (format: {})", model_path, if use_safetensors { "safetensors" } else { "mpk" });
+    
+    let model = if use_safetensors {
+        let recorder = SafetensorsFileRecorder::<FullPrecisionSettings>::default();
+        model.load_record(
+            recorder
+                .load(model_path.clone().into(), &device)
+                .expect("Failed to load safetensors weights"),
+        )
+    } else {
+        let recorder = NamedMpkFileRecorder::<FullPrecisionSettings>::default();
+        model.load_record(
+            recorder
+                .load(model_path.clone().into(), &device)
+                .expect("Failed to load mpk weights"),
+        )
+    };
 
-    println!("Model initialized and weights loaded.");
+    println!("Model initialized and weights loaded (with RoPE and causal mask).");
 
     // Run Model in Chunks with Overlapping Windows
     let chunk_size = 1024; // Full context window size

@@ -173,11 +173,15 @@ def extract_and_optimize(safetensors_path):
     return hypersphere_coords, shells
 ```
 
-## Implementation Status
+## Implementation
 
-The pre-norm signal extraction is fully implemented in the BLT-Burn model. The water-filling algorithms in `scripts/water_filling_integration.py` demonstrate how to use this signal for hypersphere organization.
+The model implements the full Meta BLT architecture:
 
-The key architectural change is capturing embeddings **before** the final RMS normalization layer, preserving the L2 magnitude information that would otherwise be lost.
+- **RoPE (Rotary Position Embeddings)** with θ=10000, applied to Q and K tensors
+- **Causal attention mask** for autoregressive decoding
+- **Pre-norm signal extraction** before the final RMS normalization
+
+The `forward_with_embeddings()` method captures embeddings **before** the final normalization layer, preserving the L2 magnitude information that would otherwise be lost. This signal feeds directly into water-filling algorithms.
 
 ## Key Takeaways
 

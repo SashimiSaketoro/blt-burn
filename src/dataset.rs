@@ -15,7 +15,14 @@ pub struct FineWebEduDataset {
 }
 
 impl FineWebEduDataset {
-    pub fn new(subset: &str, split: &str, cache_dir: &str) -> Result<Self, anyhow::Error> {
+    /// Create a new FineWebEduDataset for corpus ingestion.
+    /// 
+    /// # Arguments
+    /// * `subset` - Dataset subset/configuration (e.g., "sample-10BT")
+    /// * `partition` - HuggingFace partition name (usually "train" for full corpus - NOT a training split)
+    /// * `base_dir` - Where burn stores its SQLite database
+    /// * `hf_cache` - Optional HF cache override. If None, uses system default (respects symlinks)
+    pub fn new(subset: &str, partition: &str, base_dir: &str, hf_cache: Option<&str>) -> Result<Self, anyhow::Error> {
         // Use build-time detected venv if available
         if let (Some(venv_bin), Some(python_path)) = (
             option_env!("BLT_PYTHON_VENV_BIN"),
@@ -27,12 +34,19 @@ impl FineWebEduDataset {
             std::env::set_var("PYTHON", python_path);
         }
         
-        let dataset = HuggingfaceDatasetLoader::new("HuggingFaceFW/fineweb-edu")
+        // By default, let HuggingFace use its system cache (respects symlinks like ~/.cache/huggingface -> /Volumes/ai/)
+        // Only override if user explicitly provides --hf-cache
+        let mut loader = HuggingfaceDatasetLoader::new("HuggingFaceFW/fineweb-edu")
             .with_subset(subset)
-            .with_huggingface_cache_dir(cache_dir)
-            .with_base_dir(cache_dir) // Also set base dir for burn db
-            .with_use_python_venv(false) // Don't create venv, use existing one from PATH
-            .dataset(split)?;
+            .with_base_dir(base_dir)  // Where burn stores the SQLite DB
+            .with_use_python_venv(false); // Don't create venv, use existing one from PATH
+        
+        // Only set HF cache if explicitly overridden
+        if let Some(cache_path) = hf_cache {
+            loader = loader.with_huggingface_cache_dir(cache_path);
+        }
+        
+        let dataset = loader.dataset(partition)?;
 
         Ok(Self { dataset })
     }

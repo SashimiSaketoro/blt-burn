@@ -60,13 +60,12 @@ The L2 norm preserves important information for:
 
 Post-normalization eliminates this signal - all points become L2=1.0.
 
-## Files in This Repository
+## Key Files
 
-1. `src/model.rs` - BLT transformer with pre-norm extraction
-2. `scripts/water_filling_integration.py` - Python water-filling integration (updated for SQLite hypergraph sidecars)
-3. `docs/PRE_NORM_SIGNAL_EXTRACTION.md` - Technical documentation
-4. `scripts/demo_prenorm_signal.py` - Signal demonstration script
-5. `src/sidecar.rs` - Hypergraph sidecar implementation (new in v0.2)
-6. `src/ffmpeg.rs` - User-controlled FFmpeg integration (new in v0.2)
-
-Ready to integrate with your water-filling pipeline!
+| File | Purpose |
+|------|---------|
+| `src/blt_core.rs` | Canonical BLT data structures (`BltExample`, `BltExampleWithEmbeddings`) |
+| `src/model.rs` | BLT transformer with RoPE, causal mask, and pre-norm extraction |
+| `src/sidecar.rs` | Hypergraph sidecar implementation (SQLite storage) |
+| `src/huggingface_loader.rs` | HuggingFace dataset processing with full inference |
+| `scripts/water_filling_integration.py` | Python water-filling integration |

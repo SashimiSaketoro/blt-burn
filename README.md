@@ -7,11 +7,33 @@
 [![License](https://img.shields.io/badge/License-CC%20BY--NC%204.0-lightgrey.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.70+-orange.svg)](https://www.rust-lang.org/)
 
+## What's New in v0.5
+
+- **Fused CubeCL Kernels (Default)**: All core GPU operations now use optimized fused kernels:
+  - Entropy: 1.56x faster (parallel reduction with `plane_sum`)
+  - RMS Norm: 1.30x faster (fused mean + normalize)
+  - L2 Norm: 1.25x faster (fused squared sum + sqrt)
+  - Softmax: Single-kernel with parallel max/sum reduction
+  - SiLU Gate: Fused sigmoid + multiply for FFN
+  - Coherence Score: Element-wise fusion
+- **Zero Config**: Fused kernels enabled by default, no feature flags needed
+
+## What's New in v0.4
+
+- **Async Prefetching**: Background document loading with `--prefetch-buffer N` (default: 4)
+- **INT8/INT4 Quantization**: Optional model quantization via `--quantize int8|int4`
+- **Batch Statistics**: Document size distribution with `--batch-stats`
+- **Persistent Memory**: CubeCL configuration for reduced GPU memory waste
+- **Performance Optimizations**: Clone removal, length-sorted processing
+
 ## What's New in v0.3
 
-- **Entropy-Weighted Prominence**: Physics-inspired water-filling allocation (`--entropy-weighted` flag)
-- **Entropy & Coherence Export**: Full signal metrics exported to safetensors
-- **Coherence-Biased Retrieval**: Favor low-entropy, high-confidence segments over surface statistics
+- **RoPE Implementation**: Full Rotary Position Embeddings following Meta's BLT architecture (θ=10000)
+- **Causal Attention Mask**: Proper autoregressive masking in self-attention
+- **Direct SafeTensors Loading**: Load original Facebook `blt-entropy` weights directly via `burn-import`
+- **Core BLT Module**: `blt_core.rs` with canonical data structures matching Facebook's implementation
+- **External Drive Support**: `--external-drive` flag for processing large datasets on external storage
+
 
 ## What's New in v0.2
 
@@ -79,12 +101,10 @@ cargo build --release
 ### Basic Usage
 
 ```rust
-use blt_burn::{
-    model::{LMTransformerConfig, LMTransformer},
-    tokenizer::BltTokenizer,
-};
+use blt_burn::{model::LMTransformerConfig, tokenizer::BltTokenizer};
 use burn::backend::wgpu::{Wgpu, WgpuDevice};
-use burn::record::{HalfPrecisionSettings, NamedMpkFileRecorder, Recorder};
+use burn::record::{FullPrecisionSettings, Recorder};
+use burn_import::safetensors::SafetensorsFileRecorder;
 
 let device = WgpuDevice::default();
 let config = LMTransformerConfig {
@@ -92,14 +112,15 @@ let config = LMTransformerConfig {
     n_layers: 14,
     n_heads: Some(12),
     vocab_size: 260,
+    rope_theta: 10000.0,
     // ... other config
 };
 let model = config.init::<Wgpu>(&device);
 
-// Load weights (auto-downloads from HF if not present)
-let recorder = NamedMpkFileRecorder::<HalfPrecisionSettings>::default();
+// Load weights from safetensors (auto-detected from HF cache)
+let recorder = SafetensorsFileRecorder::<FullPrecisionSettings>::default();
 let model = model.load_record(
-    recorder.load("blt_entropy_model.mpk".into(), &device)?
+    recorder.load("model.safetensors".into(), &device)?
 );
 
 // Extract pre-norm embeddings
@@ -108,30 +129,47 @@ let embeddings = output.pre_norm_embeddings;  // For sphere placement
 let prominence = output.embedding_norms;      // For water-filling
 ```
 
-### Download Model
+### Model Weights
 
-The model is automatically downloaded at build time from HuggingFace:
+The build script automatically detects the Facebook BLT entropy model in your HuggingFace cache:
 
 ```bash
-# Build downloads the model automatically
-cargo build --release
+# Download the model first (if not already cached)
+huggingface-cli download facebook/blt-entropy model.safetensors
 
-# Or run any binary that needs the model
+# Build/run - model is auto-detected from HF cache
+cargo build --release
 cargo run --bin ingest
 ```
 
-**Repository**: [SashimiSaketoro/entropy_burn](https://huggingface.co/SashimiSaketoro/entropy_burn)  
-**File**: `blt_entropy_model.mpk` (bf16 weights)
+**Source Model**: [facebook/blt-entropy](https://huggingface.co/facebook/blt-entropy)  
+**Format**: SafeTensors (also supports Burn MPK format with `--use-mpk` flag)
+
+### Large Dataset Processing
+
+For datasets that won't fit on your internal drive (like FineWeb-Edu 10B):
+
+```bash
+# Use an external drive
+cargo run --release --bin ingest -- \
+  --external-drive /Volumes/MyExternalDrive/blt_data \
+  --limit 1000
+
+# Or specify paths manually
+cargo run --release --bin ingest -- \
+  --cache-dir /Volumes/MyExternalDrive/cache \
+  --output-dir /Volumes/MyExternalDrive/output
+```
 
 ## Features
 
+- ✅ **RoPE & Causal Masking** - Full positional encoding following Meta's BLT architecture
 - ✅ **Pre-L2-Norm Signal Extraction** - Preserves magnitude variance for prominence detection
 - ✅ **Entropy-Based Patching** - Monotonic boundary detection using model confidence
 - ✅ **Entropy-Weighted Allocation** - Physics-inspired allocation for coherence-biased retrieval
 - ✅ **Multimodal Support** - Text, images, audio, code pre-tokenization
-- ✅ **Pure-Rust Approach** - No system dependencies for core functionality
+- ✅ **Direct SafeTensors Loading** - Load Facebook's original weights without conversion
 - ✅ **GPU Acceleration** - Automatic acceleration via WGPU
-- ✅ **bf16 Weights** - Half-precision model weights
 - ✅ **FineWeb-Edu Integration** - Built-in dataset utilities
 - ✅ **Water-Filling Ready** - Output format optimized for hypersphere pipelines
 - ✅ **Hypergraph Sidecar** - SQLite-based storage with explicit Trunk-Branch-Leaf topology alongside tensors
@@ -256,16 +294,15 @@ blt-burn/
 │   ├── pretokenize.rs    # Multimodal pre-tokenization
 │   ├── patcher.rs        # Entropy & patch extraction
 │   ├── dataset.rs        # FineWeb-Edu utilities
-│   └── bin/              # Binary executables
-│       ├── ingest.rs     # Main ingestion pipeline
-│       ├── pretokenize_demo.rs  # Pre-tokenization demo
-│       └── test_tokenizer.rs    # Tokenizer testing
-├── scripts/
-│   ├── water_filling_integration.py  # Python sphere algorithms
-│   ├── demo_prenorm_signal.py       # Pre-norm signal demo
-│   ├── inspect_sphere_result.py     # Sphere result inspector
-│   └── tune_entropy_threshold.py    # Find optimal entropy thresholds
-├── docs/                 # Documentation
+│   ├── prefetch.rs       # Async document prefetching
+│   ├── batching.rs       # Length sorting & batch stats
+│   ├── quantization.rs   # INT8/INT4 model quantization
+│   ├── sidecar.rs        # Hypergraph SQLite storage
+│   └── bin/
+│       └── ingest.rs     # Main ingestion pipeline
+├── cubecl.toml           # GPU memory optimization config
+├── docs/
+│   └── OPTIMIZATION_GUIDE.md  # Future research areas
 └── Cargo.toml
 ```
 
@@ -304,7 +341,7 @@ Contributions welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guideli
 
 ## API Quick Reference
 
-Three functions you probably care about most:
+### Core Functions
 
 - **`tokenizer::BltTokenizer::encode_bytes`**  
   _Turn raw bytes into entropy-model-ready tokens._
@@ -315,6 +352,26 @@ Three functions you probably care about most:
 - **`pretokenize::detect_modality`**  
   _Auto-detect content type (Image, Audio, Video, Code) from magic bytes._
 
-**Version**: 0.2.0  
-**Last Updated**: 2025-11-20
+### Performance Modules
+
+- **`prefetch::DocumentPrefetcher`**  
+  _Background document loading with bounded channel for I/O overlap._
+
+- **`batching::BatchStats`**  
+  _Document size distribution and length-sorted processing utilities._
+
+- **`quantization::quantize_model`**  
+  _Apply INT8/INT4 quantization to model weights using Burn's QuantScheme._
+
+### CLI Options (ingest)
+
+```bash
+--quantize int8|int4    # Enable model quantization
+--quant-stats           # Print quantization statistics and exit
+--prefetch-buffer N     # Documents to buffer ahead (default: 4)
+--batch-stats           # Print document size distribution
+```
+
+**Version**: 0.5.0  
+**Last Updated**: 2025-11-25
 

@@ -1,5 +1,41 @@
-use burn::tensor::{activation::log_softmax, backend::Backend, Int, Tensor};
+#[cfg(not(feature = "fused-entropy"))]
+use burn::tensor::activation::log_softmax;
+use burn::tensor::{backend::Backend, Int, Tensor};
 
+/// Compute entropy from logits using the fused CubeCL kernel.
+///
+/// This version uses a single fused kernel that combines softmax, log,
+/// multiplication, and reduction for 3-5x better performance.
+///
+/// # Arguments
+/// * `scores` - Input logits tensor of shape `[batch, seq_len, vocab_size]`
+///
+/// # Returns
+/// Entropy tensor of shape `[batch, seq_len]`
+#[cfg(feature = "fused-entropy")]
+pub fn entropy<B>(scores: Tensor<B, 3>) -> Tensor<B, 2>
+where
+    B: crate::fused_ops::FusedEntropyBackend,
+{
+    let [_bs, _seq_len, vocab] = scores.dims();
+    crate::fused_ops::fused_entropy(scores, vocab)
+}
+
+/// Compute entropy from logits using standard tensor operations.
+///
+/// This is the fallback implementation used when the `fused-entropy` feature
+/// is not enabled. It uses Burn's standard tensor operations which benefit
+/// from auto-fusion for element-wise operations but not for reductions.
+///
+/// # Arguments
+/// * `scores` - Input logits tensor of shape `[batch, seq_len, vocab_size]`
+///
+/// # Returns
+/// Entropy tensor of shape `[batch, seq_len]`
+///
+/// # Formula
+/// `entropy = -sum(p * log(p))` where `p = softmax(scores)`
+#[cfg(not(feature = "fused-entropy"))]
 pub fn entropy<B: Backend>(scores: Tensor<B, 3>) -> Tensor<B, 2> {
     // scores: [bs, seq_len, vocab]
     // returns: [bs, seq_len]

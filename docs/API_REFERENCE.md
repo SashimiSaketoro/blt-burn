@@ -48,6 +48,35 @@
 
 ## Core Modules
 
+### `blt_core.rs`
+
+Canonical BLT data structures matching Facebook's implementation.
+
+```rust
+// Core BLT output (matches Facebook's BltExample)
+pub struct BltExample {
+    pub sample_id: String,
+    pub text: Option<String>,
+    pub tokens: Vec<i32>,
+    pub entropies: Vec<f32>,
+    pub patch_lengths: Vec<i32>,
+    pub mask: Vec<bool>,
+}
+
+// Extended output with pre-L2-norm signals for hypersphere
+pub struct BltExampleWithEmbeddings {
+    pub core: BltExample,
+    pub pre_norm_embeddings: Vec<f32>,  // [seq_len * 768]
+    pub prominence: Vec<f32>,            // L2 norms
+    pub coherence_scores: Vec<f32>,      // prominence²/entropy
+    pub patch_indices: Vec<i32>,
+}
+
+// Processing functions
+pub fn process_bytes(data: &[u8], ...) -> BltExample;
+pub fn process_bytes_with_embeddings(data: &[u8], ...) -> BltExampleWithEmbeddings;
+```
+
 ### Module Structure
 
 ```
@@ -371,6 +400,60 @@ let prominence = output.embedding_norms;      // Water-filling input
 
 ---
 
+## Fused GPU Operations
+
+### Overview
+
+BLT-Burn includes optimized CubeCL kernels that fuse multiple GPU operations into single kernel launches, reducing memory bandwidth and kernel launch overhead. **Fused kernels are enabled by default.**
+
+### Available Fused Operations
+
+| Operation | Speedup | Description |
+|-----------|---------|-------------|
+| `fused_entropy` | 1.56x | Softmax + entropy in single pass |
+| `fused_rms_norm` | 1.30x | Mean squared + normalize + scale |
+| `fused_l2_norm` | 1.25x | Sum of squares + sqrt |
+| `fused_softmax` | ~1x | Max + exp + sum (already efficient) |
+| `fused_silu_gate` | 1.12x | sigmoid(x) * x * up (for SwiGLU FFN) |
+| `fused_coherence` | ~1x | norm² / (entropy + ε) |
+
+### Usage
+
+Fused operations are automatically used when calling standard functions like `entropy()`:
+
+```rust
+use blt_burn::patcher::entropy;
+
+// Automatically uses fused kernel when available
+let entropies = entropy(output.logits);
+```
+
+For direct access to fused operations:
+
+```rust
+use blt_burn::fused_ops::{fused_entropy, fused_rms_norm, fused_l2_norm};
+
+// Direct fused entropy
+let entropies = fused_entropy(logits, vocab_size);
+
+// Fused RMS normalization
+let normalized = fused_rms_norm(input, weight, epsilon);
+
+// Fused L2 norm
+let norms = fused_l2_norm(input, dim);
+```
+
+### Disabling Fused Kernels
+
+To use reference implementations instead:
+
+```bash
+# Build without fused kernels
+cargo build --no-default-features
+```
+
+---
+
 ## Entropy & Patching
 
 ### Entropy Calculation
@@ -380,6 +463,7 @@ use blt_burn::patcher::entropy;
 
 let logits = output.logits;  // [batch, seq_len, vocab]
 let entropies = entropy(logits);  // [batch, seq_len]
+// Note: Uses fused CubeCL kernel by default for 1.56x speedup
 ```
 
 ### Patch Boundary Detection
@@ -717,17 +801,18 @@ use blt_burn::{
 };
 use burn::backend::wgpu::{Wgpu, WgpuDevice};
 use burn::tensor::{Tensor, Int};
-use burn::record::{NamedMpkFileRecorder, HalfPrecisionSettings, Recorder};
+use burn::record::{FullPrecisionSettings, Recorder};
+use burn_import::safetensors::SafetensorsFileRecorder;
 
 fn main() -> anyhow::Result<()> {
     let device = WgpuDevice::default();
     
-    // Load model
+    // Load model from safetensors (recommended)
     let config = LMTransformerConfig::default();
     let model = config.init::<Wgpu>(&device);
-    let recorder = NamedMpkFileRecorder::<HalfPrecisionSettings>::default();
+    let recorder = SafetensorsFileRecorder::<FullPrecisionSettings>::default();
     let model = model.load_record(
-        recorder.load("blt_entropy_model.mpk".into(), &device)?
+        recorder.load("model.safetensors".into(), &device)?
     );
     
     // Tokenize
@@ -867,28 +952,59 @@ The specific parameters for hypersphere organization (shells, radii, etc.) depen
 
 ## Model Weights
 
-### Hugging Face Repository
+### Loading Weights
+
+BLT-Burn supports loading weights from two formats:
+
+1. **SafeTensors (recommended)** - Original Facebook model weights from HuggingFace cache
+2. **MPK** - Burn's native binary format
+
+The build script automatically detects the Facebook BLT entropy model if present in your HuggingFace cache:
 
 ```bash
-# Automatic download at build time
-cargo build  # Downloads model during build
+# If you've previously downloaded facebook/blt-entropy, it will be detected automatically
+cargo build  # Finds model in ~/.cache/huggingface/hub/models--facebook--blt-entropy/
 cargo run --bin ingest  # Uses cached model
 ```
 
-**Repository**: `SashimiSaketoro/entropy_burn`  
-**File**: `blt_entropy_model.mpk` (bf16 weights)
-
 ### Manual Download
 
-```python
-from huggingface_hub import hf_hub_download
+```bash
+# Download the original Facebook model
+huggingface-cli download facebook/blt-entropy model.safetensors
 
-hf_hub_download(
-    repo_id="SashimiSaketoro/entropy_burn",
-    filename="blt_entropy_model.mpk",
-    local_dir="blt-burn/"
-)
+# Or via Python
+from huggingface_hub import hf_hub_download
+hf_hub_download(repo_id="facebook/blt-entropy", filename="model.safetensors")
 ```
+
+### Runtime Options
+
+```bash
+# Explicit path to safetensors
+cargo run -- --model-path ~/.cache/huggingface/.../model.safetensors --text "Hello"
+
+# Force MPK format if you have a converted model
+cargo run -- --model-path model.mpk --use-mpk --text "Hello"
+
+# Use external drive for large datasets
+cargo run -- --external-drive /Volumes/MyDrive/blt_data --limit 1000
+```
+
+### CLI Reference
+
+| Flag | Description | Default |
+|------|-------------|--------|
+| `--text` | Process inline text | - |
+| `--file` | Process file | - |
+| `--model-path` | Path to model weights | Auto-detect from HF cache |
+| `--use-mpk` | Force MPK format | false |
+| `--threshold` | Entropy threshold | 1.35 |
+| `--output-dir` | Output directory | `ingest_output` |
+| `--cache-dir` | Dataset cache | `dataset_cache` |
+| `--external-drive` | External storage path | - |
+| `--limit` | Max items to process | All |
+| `--num-shards` | JAX sharding | Auto |
 
 ---
 
@@ -908,6 +1024,6 @@ hf_hub_download(
 
 ---
 
-**Last Updated**: 2025-11-20  
-**Version**: 0.2.0  
+**Last Updated**: 2025-11-25  
+**Version**: 0.5.0  
 **Maintainer**: BLT-Burn Contributors

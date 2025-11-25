@@ -11,7 +11,11 @@ description = "Rust implementation of ByteLatent Transformer (BLT) entropy model
 [dependencies]
 burn = { git = "https://github.com/tracel-ai/burn", branch = "main", features = ["wgpu", "train", "sqlite"] }
 burn-wgpu = { git = "https://github.com/tracel-ai/burn", branch = "main" }
+burn-cubecl = { git = "https://github.com/tracel-ai/burn", branch = "main" }
+burn-fusion = { git = "https://github.com/tracel-ai/burn", branch = "main" }
+burn-import = { git = "https://github.com/tracel-ai/burn", branch = "main" }
 burn-dataset = { git = "https://github.com/tracel-ai/burn", branch = "main", optional = true }
+cubecl = { version = "0.9.0-pre.3", features = ["wgpu"] }
 bincode = { version = "2.0.0-rc.3", features = ["serde"] }
 safetensors = "0.4.1"
 serde = { version = "1.0", features = ["derive"] }
@@ -56,10 +60,18 @@ flate2 = "1.0"
 tar = "0.4"
 
 [features]
-default = []
+default = ["fused-entropy"]
 video = ["dep:ffmpeg-next", "dep:ffmpeg-sys-next"]
 burn-dataset-compat = ["dep:burn-dataset"]
+fused-entropy = []
 
 [build-dependencies]
 anyhow = "1.0"
 hf-hub = "0.3.2"
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "entropy_benchmark"
+harness = false

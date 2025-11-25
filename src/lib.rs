@@ -1,4 +1,6 @@
 pub mod arrow_reader;
+pub mod batching;
+pub mod blt_core;
 pub mod dataset;
 pub mod dataset_helpers;
 pub mod ffmpeg;
@@ -8,7 +10,23 @@ pub mod model;
 pub mod patcher;
 pub mod polars_dataset_loader;
 pub mod polars_ext;
+pub mod prefetch;
 pub mod pretokenize;
+pub mod quantization;
 pub mod reference_sources;
 pub mod sidecar;
 pub mod tokenizer;
+
+/// Fused CubeCL operations for optimized GPU kernels.
+/// 
+/// **Enabled by default** - provides 1.2-1.6x speedups for:
+/// - Entropy calculation (fused softmax + reduction)
+/// - RMS Norm (fused mean + normalize)
+/// - L2 Norm (fused squared sum + sqrt)
+/// - Softmax (fused max + exp + sum)
+/// - SiLU Gate (fused sigmoid + multiply)
+/// - Coherence Score (element-wise fusion)
+/// 
+/// Disable with `--no-default-features` if needed.
+#[cfg(feature = "fused-entropy")]
+pub mod fused_ops;

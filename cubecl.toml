@@ -1,0 +1,41 @@
+# CubeCL Configuration for BLT-Burn
+# Docs: https://burn.dev/books/cubecl/advanced-usage/config.html
+# 
+# CubeCL compiles Rust GPU code (#[cube] macro) to:
+#   - CUDA PTX (NVIDIA)
+#   - MSL (Apple Metal) - native since Burn v0.17.0
+#   - WGSL (Vulkan/WebGPU)
+#   - HIP (AMD ROCm)
+
+[streaming]
+# Persistent memory allocates model parameters with exact size (no padding)
+# This can reduce memory usage by 30-50% for static-shaped tensors
+# Options: "auto" (default), "enforced", "disabled"
+persistent_memory = "enforced"
+
+# Maximum concurrent execution streams (default: hardware dependent)
+# max_streams = 4
+
+[autotune]
+# How aggressively to search for optimal kernel configurations
+# Options: "minimal", "balanced" (default), "extensive", "full"
+level = "balanced"
+
+# Persist autotune results across runs
+# Options: "local", "target", "global", or { file = "path" }
+cache = "global"
+
+[compilation]
+# Log kernel compilation activity (useful for debugging custom kernels)
+# Options: "disabled", "basic", "full"
+# logger = { level = "disabled" }
+
+[profiling]
+# Performance measurement granularity
+# Options: "disabled", "minimal", "basic", "medium", "full"
+# logger = { level = "disabled" }
+
+# Environment variable overrides:
+#   CUBECL_DEBUG_LOG=stdout       - Log destination
+#   CUBECL_DEBUG_OPTION=profile   - Enable profiling
+#   CUBECL_AUTOTUNE_LEVEL=full    - Max autotune

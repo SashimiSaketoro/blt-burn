@@ -25,6 +25,19 @@ If you're working on sphere/water-filling integration:
 - [API_REFERENCE.md](./API_REFERENCE.md) - Start with "Water-Filling Integration" section
 - [Integration Checklist](./API_REFERENCE.md#integration-checklist-for-sphere-development)
 
+### Quick Reference
+
+| Output Field | Shape | Use For |
+|--------------|-------|---------|
+| `embeddings` | `[1, seq, 768]` | Pre-L2-norm embeddings (sphere directions) |
+| `prominence` | `[1, seq]` | L2 norms (density signal) |
+| `entropies` | `[1, seq]` | Per-token entropy |
+| `coherence_scores` | `[1, seq]` | Confidence-weighted prominence (prominence²/entropy) |
+| `patch_indices` | `[num_patches]` | Patch boundary positions |
+| `patch_lengths` | `[num_patches]` | Length of each patch |
+| `tokens` | `[1, seq]` | Byte tokens (0-259) |
+| `mask` | `[1, seq]` | Attention mask |
+
 ### Key Concepts
 1. **Use `pre_norm_embeddings`** (not post-norm) from `ModelOutput`
 2. **Use `embedding_norms`** for prominence/water-filling input  
@@ -51,9 +64,14 @@ ByteSegments  Patches    ModelOutput  (embeddings,   (sphere_coords,
 
 ### Process Text
 ```rust
-use blt_burn::{model::LMTransformer, tokenizer::BltTokenizer};
+use blt_burn::{model::LMTransformerConfig, tokenizer::BltTokenizer};
+use burn::backend::wgpu::{Wgpu, WgpuDevice};
 
-let model = LMTransformer::load("blt_entropy_model.mpk")?;
+let device = WgpuDevice::default();
+let config = LMTransformerConfig::default();
+let model = config.init::<Wgpu>(&device);
+// Load weights (see API_REFERENCE.md for details)
+
 let tokenizer = BltTokenizer::new(true, true);
 let output = model.forward_with_embeddings(tokens);
 
@@ -102,13 +120,5 @@ blt-burn/
 
 ---
 
-**Last Updated**: 2025-11-20  
-**Version**: 0.2.0
-
-## What's New in v0.2
-
-- **SQLite Hypergraph Sidecars**: Replaced JSON with SQLite for production-scale storage
-- **JAX-Compatible Sharding**: Automatic dataset sharding for distributed processing
-- **User-Controlled FFmpeg**: Interactive installation prompts instead of automatic build-time installation  
-- **Improved Documentation**: Added modality status matrix, end-to-end examples, and API quick reference
-- **Python Script Updates**: Full support for SQLite sidecars in inspection and water-filling scripts
+**Last Updated**: 2025-11-24  
+**Version**: 0.3.0

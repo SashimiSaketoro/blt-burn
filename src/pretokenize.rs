@@ -14,7 +14,7 @@ use symphonia::core::probe::Hint;
 
 // PDF imports
 use pdfium_render::prelude::*;
-use image::ImageOutputFormat;
+// Note: pdfium-render uses image 0.25, so we use its re-exported types
 use uuid::Uuid;
 
 // Goblin imports
@@ -612,7 +612,7 @@ impl ModalityPreTokenizer for PdfPreTokenizer {
 
         let pdfium = Pdfium::new(bindings);
         let doc = pdfium
-            .load_pdf_from_bytes(data, None)
+            .load_pdf_from_byte_slice(data, None)
             .map_err(|e| anyhow::anyhow!("Failed to parse PDF: {e}"))?;
 
         let mut segments = Vec::new();
@@ -628,7 +628,7 @@ impl ModalityPreTokenizer for PdfPreTokenizer {
                 confidence: 1.0,
                 extra: Some(serde_json::json!({
                     "modality": "pdf_binary",
-                    "page_count": doc.get_pages().len(),
+                    "page_count": doc.pages().len(),
                     "source_type": "raw",
                     "source_id": source_id
                 })),
@@ -675,31 +675,29 @@ impl ModalityPreTokenizer for PdfPreTokenizer {
                 let render_config = PdfRenderConfig::new().set_target_width(1024);
                 match page.render_with_config(&render_config) {
                     Ok(bitmap) => {
-                        if let Ok(image) = bitmap.as_image() {
-                            let mut png_bytes = Vec::new();
-                            if image
-                                .write_to(&mut Cursor::new(&mut png_bytes), ImageOutputFormat::Png)
-                                .is_ok()
-                            {
-                                segments.push(ByteSegment {
-                                    bytes: png_bytes,
-                                    label: Some(format!("{page_label}_image")),
-                                    metadata: Some(SegmentMetadata {
-                                        start_offset: 0,
-                                        end_offset: 0,
-                                        confidence: 1.0,
-                                        extra: Some(serde_json::json!({
-                                            "page": page_num,
-                                            "modality": "pdf_image",
-                                            "source_type": "rendered_image",
-                                            "source_id": source_id,
-                                            "format": "png",
-                                            "dimensions": {"width": image.width(), "height": image.height()},
-                                        })),
-                                    }),
-                                });
-                            }
-                        }
+                        // Get bitmap dimensions and raw bytes (BGRA format)
+                        let width = bitmap.width();
+                        let height = bitmap.height();
+                        let format = format!("{:?}", bitmap.format());
+                        // Store raw bitmap bytes - downstream can decode if needed
+                        let raw_bytes = bitmap.as_raw_bytes().to_vec();
+                        segments.push(ByteSegment {
+                            bytes: raw_bytes,
+                            label: Some(format!("{page_label}_image")),
+                            metadata: Some(SegmentMetadata {
+                                start_offset: 0,
+                                end_offset: 0,
+                                confidence: 1.0,
+                                extra: Some(serde_json::json!({
+                                    "page": page_num,
+                                    "modality": "pdf_image",
+                                    "source_type": "rendered_image",
+                                    "source_id": source_id,
+                                    "format": format,
+                                    "dimensions": {"width": width, "height": height},
+                                })),
+                            }),
+                        });
                     }
                     Err(e) => {
                         eprintln!(
