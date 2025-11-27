@@ -1,18 +1,18 @@
 //! Model quantization utilities for BLT-Burn
 //!
 //! Provides optional INT8/INT4 quantization for model weights using Burn's
-//! quantization API. This can significantly reduce memory usage and improve
-//! inference speed on supported hardware.
+//! quantization API. This reduces memory usage and can improve inference speed
+//! on supported hardware.
 //!
 //! # Usage
 //! ```bash
 //! # Default: BF16 (no quantization)
 //! cargo run --release --bin ingest -- --output-dir /tmp/out
 //!
-//! # INT8 per-tensor symmetric quantization (~2x speedup)
+//! # INT8 per-tensor symmetric quantization
 //! cargo run --release --bin ingest -- --output-dir /tmp/out --quantize int8
 //!
-//! # INT4 block-wise quantization (~4x compression)
+//! # INT4 block-wise quantization
 //! cargo run --release --bin ingest -- --output-dir /tmp/out --quantize int4
 //! ```
 
@@ -43,15 +43,26 @@ pub enum QuantConfig {
 }
 
 impl QuantConfig {
-    /// Parse quantization mode from CLI string
-    pub fn from_str(s: &str) -> Self {
+    /// Parse quantization mode from CLI string (with error handling)
+    /// 
+    /// Returns an error for unrecognized modes instead of silently defaulting to None.
+    pub fn try_from_str(s: &str) -> Result<Self, String> {
         match s.to_lowercase().as_str() {
-            "int8" | "q8" => Self::Int8PerTensor,
-            "int8-channel" | "q8c" => Self::Int8PerChannel,
-            "int4" | "q4" => Self::Int4Block32,
-            "int4-64" | "q4-64" => Self::Int4Block64,
-            _ => Self::None,
+            "none" => Ok(Self::None),
+            "int8" | "q8" => Ok(Self::Int8PerTensor),
+            "int8-channel" | "q8c" => Ok(Self::Int8PerChannel),
+            "int4" | "q4" => Ok(Self::Int4Block32),
+            "int4-64" | "q4-64" => Ok(Self::Int4Block64),
+            _ => Err(format!(
+                "Invalid quantization mode '{}'. Valid options: none, int8, q8, int8-channel, q8c, int4, q4, int4-64, q4-64",
+                s
+            )),
         }
+    }
+
+    /// Parse quantization mode from CLI string (legacy, defaults to None for unknown)
+    pub fn from_str(s: &str) -> Self {
+        Self::try_from_str(s).unwrap_or(Self::None)
     }
 
     /// Get bits per weight for this config
@@ -171,32 +182,21 @@ impl QuantStats {
     }
 }
 
-// Note: Actual quantization implementation requires Burn's quantization feature
-// which is still in beta. The code below is a placeholder for when the API stabilizes.
+// =============================================================================
+// Implementation Status (Burn 0.19.1)
+// =============================================================================
+// Quantization is now fully implemented using Burn's stable quantization API.
+// The `quantize_model` function above uses:
+//   - Quantizer with MinMax calibration
+//   - Per-tensor symmetric INT8 (Q8S) for Int8PerTensor
+//   - Block-wise INT4 (Q4F) with configurable block sizes
 //
-// To enable quantization, add to Cargo.toml:
-// burn = { ..., features = ["wgpu", "quantization"] }
+// Supported modes:
+//   - Int8PerTensor: ~2x compression, minimal accuracy loss
+//   - Int4Block32/64: ~4x compression, some accuracy loss
 //
-// Then implement:
-// ```rust
-// use burn::tensor::quantization::{
-//     BlockSize, Calibration, QuantLevel, QuantMode,
-//     QuantParam, QuantScheme, QuantStore, QuantValue, Quantizer,
-// };
-//
-// pub fn quantize_model<B: Backend, M: Module<B>>(model: M, config: QuantConfig) -> M {
-//     match config.to_scheme() {
-//         None => model,
-//         Some(scheme) => {
-//             let mut quantizer = Quantizer {
-//                 calibration: Calibration::MinMax,
-//                 scheme,
-//             };
-//             model.quantize_weights(&mut quantizer)
-//         }
-//     }
-// }
-// ```
+// Usage: Apply to any Burn Module after loading weights:
+//   let quantized_model = quantize_model(model, QuantConfig::Int8PerTensor);
 
 #[cfg(test)]
 mod tests {

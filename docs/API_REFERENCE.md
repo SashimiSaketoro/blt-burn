@@ -84,10 +84,22 @@ blt-burn/
 ├── src/
 │   ├── model.rs           # BLT transformer architecture
 │   ├── tokenizer.rs       # Text tokenization (BLT, TikToken, SentencePiece)
-│   ├── pretokenize.rs     # Multimodal pre-tokenization framework
+│   ├── hf_resolver.rs     # Centralized HuggingFace path resolution
+│   ├── modalities/        # Multimodal pre-tokenization framework
+│   │   ├── mod.rs         # Trait, factory, auto-detection
+│   │   ├── text.rs        # Raw UTF-8 / HF tokenizer
+│   │   ├── image.rs       # Patch extraction with entropy merging
+│   │   ├── audio.rs       # Symphonia decoder
+│   │   ├── code.rs        # Tree-sitter AST segmentation
+│   │   ├── document.rs    # PDF multi-view (raw/text/image)
+│   │   ├── video.rs       # FFmpeg frame extraction
+│   │   └── binary.rs      # ELF/PE section extraction
+│   ├── pretokenize.rs     # Legacy (deprecated, use modalities)
 │   ├── patcher.rs         # Entropy calculation & patch extraction
 │   ├── dataset.rs         # FineWeb-Edu and dataset utilities
 │   ├── sidecar.rs         # Hypergraph DTO and builder
+│   ├── generic_processor.rs # Schema-inferred dataset processing
+│   ├── polars_dataset_loader.rs # Polars-based HF dataset loading
 │   └── lib.rs             # Public API exports
 ├── docs/
 │   ├── API_REFERENCE.md   # This file
@@ -174,9 +186,13 @@ The pre-tokenization system segments raw data into semantically meaningful byte 
 ### Core Trait
 
 ```rust
-pub trait ModalityPreTokenizer {
+use blt_burn::modalities::{ModalityPreTokenizer, ByteSegment, SegmentMetadata};
+
+pub trait ModalityPreTokenizer: Send + Sync {
     fn pre_tokenize(&self, data: &[u8]) -> Result<Vec<ByteSegment>>;
     fn modality(&self) -> &str;
+    fn supports_multiview(&self) -> bool { false }
+    fn pre_tokenize_multiview(&self, data: &[u8]) -> Result<HashMap<String, Vec<ByteSegment>>>;
 }
 
 pub struct ByteSegment {
@@ -189,7 +205,7 @@ pub struct ByteSegment {
 ### Automatic Format Detection
 
 ```rust
-use blt_burn::pretokenize::detect_modality;
+use blt_burn::modalities::detect_modality;
 
 let data = std::fs::read("file.unknown")?;
 let pt_type = detect_modality(&data);
@@ -199,7 +215,7 @@ let segments = pt_type.create()?.pre_tokenize(&data)?;
 ### Text Pre-Tokenizers
 
 ```rust
-use blt_burn::pretokenize::{PreTokenizerType, ModalityPreTokenizer};
+use blt_burn::modalities::{PreTokenizerType, ModalityPreTokenizer};
 
 // Raw UTF-8 bytes (BLT-style)
 let pretokenizer = PreTokenizerType::TextRaw.create()?;
@@ -270,16 +286,47 @@ for seg in segments {
 }
 ```
 
-### Planned Pre-Tokenizers (Stubs Available)
+### PDF Pre-Tokenizer (Multi-View Support)
 
-#### PDF Pre-Tokenizer
+PDF processing supports multiple extraction modes suitable for multi-view cross-modal learning:
+
 ```rust
-// Requires: pdf = "0.9" in Cargo.toml
+use blt_burn::modalities::{PreTokenizerType, PdfMode};
+
+// Text-only mode (default, most efficient)
 let pretokenizer = PreTokenizerType::Pdf { 
-    extract_text: true 
+    mode: PdfMode::TextOnly 
 }.create()?;
-// Currently returns error, implement with pdf crate
+
+// Multi-view mode: emits raw + text + images with shared source_id
+let pretokenizer = PreTokenizerType::Pdf { 
+    mode: PdfMode::MultiView 
+}.create()?;
+
+// Other modes
+let pretokenizer = PreTokenizerType::Pdf { mode: PdfMode::RawOnly }.create()?;
+let pretokenizer = PreTokenizerType::Pdf { mode: PdfMode::ImageOnly }.create()?;
 ```
+
+**CLI Integration**:
+```bash
+# Multi-view: creates same_source hyperedges for cross-modal learning
+cargo run --bin ingest -- --file document.pdf --multiview-pdf
+
+# Single mode extraction
+cargo run --bin ingest -- --file document.pdf --pdf-mode text_only
+```
+
+**Multi-View Output Structure**:
+```
+PDF Document (source_id: abc123)
+├── pdf_raw          - Original binary (structural patterns)
+├── pdf_page_1_text  - Extracted text (semantic content)
+├── pdf_page_1_image - Rendered image (visual layout)
+└── ...
+```
+
+All views share the same `source_id` in metadata, enabling the hypergraph to create `same_source` edges between them.
 
 #### Video Pre-Tokenizer
 ```rust
@@ -288,7 +335,7 @@ let pretokenizer = PreTokenizerType::Video {
 }.create()?;
 
 // FFmpeg is detected at runtime with user-controlled installation
-// Full video frame extraction with comprehensive codec support
+// Video frame extraction supporting common codecs (H.264, HEVC, VP9, AV1)
 ```
 
 **FFmpeg Integration**:
@@ -408,14 +455,14 @@ BLT-Burn includes optimized CubeCL kernels that fuse multiple GPU operations int
 
 ### Available Fused Operations
 
-| Operation | Speedup | Description |
-|-----------|---------|-------------|
-| `fused_entropy` | 1.56x | Softmax + entropy in single pass |
-| `fused_rms_norm` | 1.30x | Mean squared + normalize + scale |
-| `fused_l2_norm` | 1.25x | Sum of squares + sqrt |
-| `fused_softmax` | ~1x | Max + exp + sum (already efficient) |
-| `fused_silu_gate` | 1.12x | sigmoid(x) * x * up (for SwiGLU FFN) |
-| `fused_coherence` | ~1x | norm² / (entropy + ε) |
+| Operation | Notes | Description |
+|-----------|-------|-------------|
+| `fused_entropy` | Single-kernel implementation | Softmax and entropy in one pass |
+| `fused_rms_norm` | Single-kernel implementation | Mean squared, normalization, and scaling in one pass |
+| `fused_l2_norm` | Single-kernel implementation | Sum of squares and square root in one pass |
+| `fused_softmax` | Single-kernel implementation | Max, exponentiation, and normalization in one pass |
+| `fused_silu_gate` | Single-kernel implementation | `sigmoid(x) * x * up` for SwiGLU-style FFN |
+| `fused_coherence` | Single-kernel implementation | `norm² / (entropy + ε)` |
 
 ### Usage
 
@@ -463,7 +510,7 @@ use blt_burn::patcher::entropy;
 
 let logits = output.logits;  // [batch, seq_len, vocab]
 let entropies = entropy(logits);  // [batch, seq_len]
-// Note: Uses fused CubeCL kernel by default for 1.56x speedup
+// Uses the fused CubeCL kernel by default when the corresponding feature is enabled.
 ```
 
 ### Patch Boundary Detection
@@ -630,6 +677,77 @@ fn process_large_file(path: &str) -> Result<()> {
     }
     Ok(())
 }
+```
+
+### HuggingFace Path Resolution
+
+BLT-Burn includes a centralized `HfResolver` module for resolving file paths from HuggingFace datasets with automatic download, caching, and fallback handling.
+
+#### HfResolver Configuration
+
+```rust
+use blt_burn::hf_resolver::{HfResolver, HfResolverConfig};
+
+let config = HfResolverConfig::new("username/dataset", Path::new(".cache"))
+    .with_skip_missing(false)   // Use fallbacks instead of skipping
+    .with_token(Some("hf_xxx".to_string()));  // Optional auth token
+
+let resolver = HfResolver::new(config);
+```
+
+#### Resolving Files
+
+```rust
+// Resolve a file path, downloading if necessary
+let bytes = resolver.resolve("images/sample.jpg", true)?;  // is_image=true
+
+// For hf:// URIs with revision support
+let bytes = resolver.resolve_hf_uri(
+    "hf://datasets/owner/dataset@main/images/test.jpg", 
+    true
+)?;
+
+// Direct URL resolution
+let bytes = HfResolver::resolve_url(
+    "https://example.com/image.jpg",
+    Path::new(".cache")
+)?;
+```
+
+#### Zero Tensor Fallback
+
+For images that cannot be resolved, `HfResolver` returns a zero tensor (224×224×3 = 150,528 bytes) instead of failing. This preserves tensor shape consistency without introducing semantic noise from placeholder text.
+
+```rust
+// Constants available for custom fallback handling
+use blt_burn::hf_resolver::{DEFAULT_IMAGE_WIDTH, DEFAULT_IMAGE_HEIGHT, ZERO_IMAGE_SIZE};
+
+assert_eq!(ZERO_IMAGE_SIZE, 224 * 224 * 3);  // 150,528 bytes
+```
+
+#### URI Parsing
+
+The module supports parsing `hf://datasets/` URIs with optional revision specifiers:
+
+```rust
+use blt_burn::hf_resolver::parse_hf_uri;
+
+// Parse hf://datasets/owner/name@revision/path format
+let parsed = parse_hf_uri("hf://datasets/owner/dataset@dev/images/test.jpg").unwrap();
+assert_eq!(parsed.repo_id, "owner/dataset");
+assert_eq!(parsed.revision, "dev");
+assert_eq!(parsed.path, "images/test.jpg");
+```
+
+#### Helper Functions
+
+```rust
+use blt_burn::hf_resolver::{
+    looks_like_url,        // Detect http://, https://, s3://, gs://
+    filename_from_url,     // Extract filename or generate hash-based name
+    sanitize_path,         // Prevent directory traversal
+    encode_path_segments,  // URL-encode path segments
+};
 ```
 
 ---
@@ -843,7 +961,7 @@ fn main() -> anyhow::Result<()> {
 ### Example 2: Multimodal Pipeline
 
 ```rust
-use blt_burn::pretokenize::{PreTokenizerType, ModalityPreTokenizer};
+use blt_burn::modalities::{PreTokenizerType, ModalityPreTokenizer};
 
 fn process_image(image_path: &str) -> anyhow::Result<()> {
     // Pre-tokenize image into patches
@@ -946,7 +1064,9 @@ The specific parameters for hypersphere organization (shells, radii, etc.) depen
 - [ ] Respect `patch_indices` for semantic boundaries
 - [ ] Output `.npz` files with `sphere_coords`, `radii`, `shells`
 - [ ] Maintain `original_prominence` for analysis
-- [ ] Support multimodal inputs via `pretokenize` module
+- [ ] Support multimodal inputs via `modalities` module
+- [ ] Handle `same_source` hyperedges for multi-view documents (PDF, video)
+- [ ] Leverage `source_id` metadata for cross-modal association learning
 
 ---
 
@@ -1011,6 +1131,12 @@ cargo run -- --external-drive /Volumes/MyDrive/blt_data --limit 1000
 | `--entropy-histogram` | Export entropy distribution as JSON | false |
 | `--histogram-output` | Entropy histogram output path | `entropy_histogram.json` |
 | `--histogram-bins` | Number of histogram bins | 50 |
+| `--multiview-pdf` | Multi-view PDF extraction (raw + text + images) | false |
+| `--pdf-mode` | PDF mode: `raw_only`, `text_only`, `image_only` | `text_only` |
+| `--huggingface-dataset` | Load dataset from HuggingFace Hub | - |
+| `--hf-subset` | HuggingFace dataset subset | - |
+| `--skip-missing-files` | Skip missing files instead of using fallbacks | false |
+| `--hf-token` | HuggingFace authentication token (also via `HF_TOKEN` env) | - |
 
 ---
 
@@ -1084,6 +1210,6 @@ Each sample in the WebDataset contains:
 
 ---
 
-**Last Updated**: 2025-11-25  
-**Version**: 0.5.0  
+**Last Updated**: 2025-11-26  
+**Version**: 0.7.0  
 **Maintainer**: BLT-Burn Contributors

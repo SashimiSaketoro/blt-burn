@@ -7,16 +7,32 @@
 [![License](https://img.shields.io/badge/License-CC%20BY--NC%204.0-lightgrey.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.70+-orange.svg)](https://www.rust-lang.org/)
 
+## What's New in v0.7
+
+- **Centralized HuggingFace Path Resolution**: New `hf_resolver.rs` module provides unified path resolution with automatic download, caching, and zero-tensor fallbacks
+- **Polars 0.46 Integration**: Dataset loading uses Polars 0.46 with improved `List` dtype handling for array columns
+- **Global API Instance**: Single shared HuggingFace API instance reduces overhead and avoids rate limiting
+- **CLI Enhancements**: New `--skip-missing-files` and `--hf-token` flags for fine-grained control over dataset loading
+- **Zero Tensor Fallback**: Missing images return 224×224×3 zero tensors instead of placeholder text, preserving tensor shape without semantic noise
+
+## What's New in v0.6
+
+- **Modular Pre-Tokenization Architecture**: `pretokenize.rs` is split into `src/modalities/` with separate files per modality for cleaner organization
+- **Multi-View PDF Processing**: `--multiview-pdf` emits raw bytes, extracted text, and rendered images as separate hypergraph branches with a shared `source_id`
+- **Cross-View Hyperedges**: `same_source` edges connect views of the same document for cross-modal association learning
+- **PDF Mode Selection**: `--pdf-mode` selects the extraction mode (`raw_only`, `text_only`, `image_only`)
+- **Binary Pre-Tokenizer**: ELF/PE section extraction via `goblin` crate
+
 ## What's New in v0.5
 
-- **Fused CubeCL Kernels (Default)**: All core GPU operations now use optimized fused kernels:
-  - Entropy: 1.56x faster (parallel reduction with `plane_sum`)
-  - RMS Norm: 1.30x faster (fused mean + normalize)
-  - L2 Norm: 1.25x faster (fused squared sum + sqrt)
-  - Softmax: Single-kernel with parallel max/sum reduction
-  - SiLU Gate: Fused sigmoid + multiply for FFN
-  - Coherence Score: Element-wise fusion
-- **Zero Config**: Fused kernels enabled by default, no feature flags needed
+- **Fused CubeCL Kernels (Default)**: Core GPU operations now use fused kernels that combine multiple steps into single passes:
+  - Entropy: computes softmax and entropy in one kernel (parallel reduction with `plane_sum`)
+  - RMS Norm: computes mean, normalization, and scaling in one pass
+  - L2 Norm: computes squared sum and square root in one pass
+  - Softmax: single-kernel implementation with parallel max/sum reduction
+  - SiLU Gate: fuses sigmoid and multiply for FFN
+  - Coherence Score: computes coherence from norms and entropy in a single pass
+- **Configuration**: Fused kernels are enabled by default; no feature flags are required
 
 ## What's New in v0.4
 
@@ -59,7 +75,7 @@ BLT-Burn is a specialized implementation of select BLT components, extracting on
 - A focused implementation of BLT's entropy model for text segmentation
 - A tool for extracting pre-norm embeddings for hypersphere placement
 - A preprocessing pipeline for the Sphere water-filling algorithms
-- A high-performance Rust implementation of specific BLT components
+- A Rust implementation of specific BLT components
 
 ### ❌ What This Isn't
 - A complete port of the BLT repository
@@ -71,7 +87,7 @@ If you need the full BLT functionality, please refer to the [original repository
 
 ## Known Limitations
 
-- **Video Processing**: Requires FFmpeg to be installed (handled automatically by build script).
+- **Video Processing**: Requires FFmpeg (v3.4 - 8.0) with development headers. See [Video Processing](#video-processing-with-ffmpeg) for setup instructions.
 
 ## Entropy-Weighted Prominence Quick Start
 
@@ -177,7 +193,7 @@ cargo run --release --bin ingest -- \
 
 ### Multimodal Pre-Tokenization
 
-BLT-Burn includes a comprehensive pre-tokenization system that handles diverse data types:
+BLT-Burn includes a multi-format pre-tokenization system:
 
 #### Modality Support Matrix
 
@@ -187,12 +203,28 @@ BLT-Burn includes a comprehensive pre-tokenization system that handles diverse d
 | **Image** | `image` crate (Rust) | ✅ Yes | **Beta** |
 | **Audio** | `symphonia` (Rust) | ✅ Yes | **Beta** |
 | **Code** | `tree-sitter` (Rust) | ✅ Yes | **Beta** |
-| **Video** | FFmpeg (`video-rs`) | 🚧 Partial | **Alpha** (Interactive install) |
-| **PDF** | `pdf` crate | ❌ TODO | Stub |
-| **Binary** | `goblin` | ❌ TODO | Stub |
+| **Video** | `ffmpeg-next` | 🚧 Optional | **Beta** (Requires `--features video`) |
+| **PDF** | `pdfium-render` (Rust) | ✅ Yes | **Beta** (Multi-view support) |
+| **Binary** | `goblin` (Rust) | ✅ Yes | **Beta** (ELF/PE/Mach-O) |
+
+#### Multi-View PDF Processing
+
+For compound documents like PDFs, BLT-Burn supports multi-view extraction:
+
+```bash
+# Enable multi-view mode: emits raw + text + images as separate hypergraph branches
+cargo run --bin ingest -- --file document.pdf --multiview-pdf
+
+# Or select a specific mode
+cargo run --bin ingest -- --file document.pdf --pdf-mode text_only  # default
+cargo run --bin ingest -- --file document.pdf --pdf-mode raw_only
+cargo run --bin ingest -- --file document.pdf --pdf-mode image_only
+```
+
+Multi-view mode creates `same_source` hyperedges connecting all views of the same document, enabling downstream models to learn cross-modal associations.
 
 #### Detection & Routing
-Automatic format detection based on magic bytes:
+Automatic format detection based on file signatures:
 - JPEG (`FF D8`), PNG (`89 PNG`)
 - PDF (`%PDF-`), MP4/Video (`ftyp`)
 - WAV (`RIFF`), MP3 (`ID3` or sync bytes)
@@ -207,7 +239,7 @@ To maintain portability and ease of deployment, BLT-Burn prioritizes pure-Rust i
 - **Images**: Uses `image` crate (pure-Rust JPEG/PNG/GIF support)
 - **Documents**: `pdf` crate for PDF parsing (pure-Rust)
 - **Binaries**: `goblin` for ELF/PE/Mach-O analysis (pure-Rust)
-- **Video**: Requires FFmpeg (automatically installed during build if missing)
+- **Video**: `ffmpeg-next` v8.0 (optional, requires system FFmpeg 3.4-8.0)
 
 ### Hugging Face datasets via Polars
 
@@ -224,21 +256,75 @@ To maintain portability and ease of deployment, BLT-Burn prioritizes pure-Rust i
 
 ### Video Processing with FFmpeg
 
-BLT-Burn uses FFmpeg for comprehensive video codec support:
+BLT-Burn uses FFmpeg for video codec support (H.264, H.265/HEVC, VP8, VP9, AV1, MPEG-4, MPEG-2).
 
-- **User-Controlled Installation**: Interactive prompt when FFmpeg is needed
-- **Full Codec Support**: H.264, H.265/HEVC, VP8, VP9, AV1, MPEG-4, MPEG-2, and more
-- **CLI Options**:
-  - `--no-audio-video`: Disable audio/video support
-  - `--auto-install-ffmpeg`: Non-interactive auto-install for CI/Docker
-  - `--ffmpeg-path /path/to/ffmpeg`: Use custom FFmpeg binary
+**Setup by Platform:**
+
+<details>
+<summary><strong>🍎 macOS (Homebrew)</strong></summary>
+
+```bash
+# Install FFmpeg and pkg-config
+brew install ffmpeg pkg-config
+
+# Set environment (add to ~/.zshrc for permanent setup)
+source scripts/setup_ffmpeg_env.sh
+
+# Build with video feature
+cargo build --features video
+```
+</details>
+
+<details>
+<summary><strong>🐧 Linux (Ubuntu/Debian)</strong></summary>
+
+```bash
+# Install FFmpeg development headers
+sudo apt install ffmpeg libavcodec-dev libavformat-dev \
+                 libswscale-dev libavutil-dev pkg-config
+
+# Build with video feature
+cargo build --features video
+```
+</details>
+
+<details>
+<summary><strong>🐧 Linux (Fedora)</strong></summary>
+
+```bash
+# Install FFmpeg development headers
+sudo dnf install ffmpeg ffmpeg-devel
+
+# Build with video feature
+cargo build --features video
+```
+</details>
+
+<details>
+<summary><strong>🪟 Windows</strong></summary>
+
+```powershell
+# Download FFmpeg from: https://www.gyan.dev/ffmpeg/builds/
+# Extract to C:\ffmpeg (or your preferred location)
+
+# Set environment variable
+$env:FFMPEG_DIR = "C:\ffmpeg"
+
+# Build with video feature
+cargo build --features video
+```
+</details>
+
+**CLI Options:**
+- `--no-audio-video`: Skip audio/video processing entirely
+- Video feature is opt-in: build without `--features video` to skip FFmpeg dependency
 
 ## End-to-End Example
 
 Process a directory of files, extracting embeddings and generating the hypergraph sidecar:
 
 ```bash
-# 1. Run ingest (interactive FFmpeg check)
+# 1. Run ingest (video requires --features video and FFmpeg setup)
 cargo run --release --bin ingest -- \
   --input ./samples \
   --output ./out
@@ -291,9 +377,21 @@ blt-burn/
 ├── src/
 │   ├── model.rs          # BLT transformer architecture
 │   ├── tokenizer.rs      # Text tokenization
-│   ├── pretokenize.rs    # Multimodal pre-tokenization
+│   ├── hf_resolver.rs    # Centralized HuggingFace path resolution
+│   ├── modalities/       # Multimodal pre-tokenization
+│   │   ├── mod.rs        # Trait + factory + auto-detection
+│   │   ├── text.rs       # Raw/HF tokenizer
+│   │   ├── image.rs      # Patch extraction
+│   │   ├── audio.rs      # Symphonia decoder
+│   │   ├── code.rs       # Tree-sitter AST
+│   │   ├── document.rs   # PDF multi-view
+│   │   ├── video.rs      # FFmpeg frames
+│   │   └── binary.rs     # ELF/PE sections
+│   ├── pretokenize.rs    # Legacy (deprecated, use modalities)
 │   ├── patcher.rs        # Entropy & patch extraction
 │   ├── dataset.rs        # FineWeb-Edu utilities
+│   ├── generic_processor.rs     # Schema-inferred dataset processing
+│   ├── polars_dataset_loader.rs # Polars-based HF dataset loading
 │   ├── prefetch.rs       # Async document prefetching
 │   ├── batching.rs       # Length sorting & batch stats
 │   ├── quantization.rs   # INT8/INT4 model quantization
@@ -350,7 +448,7 @@ Contributions welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guideli
   _Run the model and get both `pre_norm_embeddings` (for geometry) and `embedding_norms` (for prominence)._
 
 - **`pretokenize::detect_modality`**  
-  _Auto-detect content type (Image, Audio, Video, Code) from magic bytes._
+  _Auto-detect content type (Image, Audio, Video, Code) from file signatures._
 
 ### Performance Modules
 
@@ -373,6 +471,12 @@ Contributions welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guideli
 --profile               # Enable CubeCL kernel profiling
 --entropy-histogram     # Export entropy distribution as JSON
 --output-format FORMAT  # Output format: safetensors (default) or webdataset
+--multiview-pdf         # Multi-view PDF: emit raw + text + images with cross-view edges
+--pdf-mode MODE         # PDF mode: raw_only, text_only (default), image_only
+--huggingface-dataset   # Load dataset from HuggingFace Hub
+--hf-subset             # HuggingFace dataset subset
+--skip-missing-files    # Skip missing files instead of using fallbacks
+--hf-token TOKEN        # HuggingFace authentication token (also via HF_TOKEN env)
 ```
 
 ### Output Formats
@@ -398,6 +502,6 @@ import webdataset as wds
 dataset = wds.WebDataset("output/shard_*.tar.gz").decode()
 ```
 
-**Version**: 0.5.0  
-**Last Updated**: 2025-11-25
+**Version**: 0.7.0  
+**Last Updated**: 2025-11-26
 

@@ -4,7 +4,7 @@
 
 > **"Preserve the L2 norm - it provides the density signal"**
 
-When we normalize embeddings to unit length for hypersphere placement, we traditionally discard the L2 magnitude. However, this magnitude contains **important prominence/density information** for water-filling optimization.
+When we normalize embeddings to unit length for hypersphere placement, we discard the L2 magnitude. However, this magnitude contains **important prominence/density information** for water-filling optimization.
 
 ## Signal Flow Diagram
 
@@ -64,7 +64,7 @@ After L2 normalization, all embeddings have identical magnitude, making these di
 
 ### Method 1: Osmotic Water-Filling
 
-Uses L2 norms as **osmotic pressure** / **density gates**:
+Uses L2 norms as an **osmotic pressure** / **density gate** signal:
 
 ```
 High L2 Norm → High Pressure → Promotes to Outer Shells
@@ -83,11 +83,11 @@ Low L2 Norm  → Low Pressure  → Demotes to Inner Shells
 
 ### Method 2: THRML Energy-Based Water-Filling
 
-Uses L2 norms as **kinetic energy**:
+Uses L2 norms as a **proxy for kinetic energy**:
 
 ```
-High L2 Norm → High Energy → Escapes to Outer Shells ("escape velocity")
-Low L2 Norm  → Low Energy  → Captured in Inner Shells ("gravitational well")
+High L2 Norm → Higher Energy → Assigned to Outer Shells
+Low L2 Norm  → Lower Energy  → Assigned to Inner Shells
 ```
 
 **Physical Analogy:**
@@ -121,7 +121,7 @@ impl<B: Backend> LMTransformer<B> {
             x = layer.forward(x.clone());
         }
         
-        // CAPTURE BEFORE NORMALIZATION!
+        // Capture pre-normalization embeddings before final RMS norm
         let pre_norm_embeddings = x.clone();
         let embedding_norms = pre_norm_embeddings
             .clone()
@@ -135,8 +135,8 @@ impl<B: Backend> LMTransformer<B> {
         
         ModelOutput {
             logits,
-            pre_norm_embeddings,  // Pass to water-filling!
-            embedding_norms,       // Direct prominence signal!
+            pre_norm_embeddings,  // Pre-norm embeddings for downstream geometry
+            embedding_norms,      // Direct prominence signal
         }
     }
 }

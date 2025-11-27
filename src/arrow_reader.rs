@@ -156,10 +156,13 @@ impl ArrowReader {
             return Err(ArrowError::RowOutOfBounds(row_idx).into());
         }
 
-        let series = self
+        let column = self
             .df
             .column(column_name)
             .map_err(|_| ArrowError::ColumnNotFound(column_name.to_string()))?;
+
+        // Get the underlying series from the column (Polars 0.46+)
+        let series = column.as_materialized_series();
 
         // Extract value based on series dtype
         match series.dtype() {
@@ -180,7 +183,7 @@ impl ArrowReader {
                 Ok(value.to_vec())
             }
             DataType::List(_) => {
-                let list_series = extract_list_series(series, row_idx)?;
+                let list_series = extract_list_series(column, row_idx)?;
                 let json_value = list_to_json(&list_series)?;
                 Ok(serde_json::to_vec(&json_value)
                     .map_err(|e| ArrowError::ReadError(e.to_string()))?)
@@ -203,14 +206,17 @@ impl ArrowReader {
             return Err(ArrowError::RowOutOfBounds(row_idx).into());
         }
 
-        let series = self
+        let column = self
             .df
             .column("images")
             .map_err(|_| ArrowError::ColumnNotFound("images".to_string()))?;
 
+        // Get the underlying series from the column (Polars 0.46+)
+        let series = column.as_materialized_series();
+
         match series.dtype() {
             DataType::List(_) => {
-                let list_series = extract_list_series(series, row_idx)?;
+                let list_series = extract_list_series(column, row_idx)?;
                 return list_series_to_images(&list_series);
             }
             DataType::Binary => {
@@ -249,7 +255,9 @@ impl ArrowReader {
     }
 }
 
-fn extract_list_series(series: &Series, row_idx: usize) -> Result<Series> {
+fn extract_list_series(column: &polars::frame::column::Column, row_idx: usize) -> Result<Series> {
+    // Get the underlying series from the column (Polars 0.46+)
+    let series = column.as_materialized_series();
     let list_chunked = series
         .list()
         .map_err(|e| ArrowError::ReadError(e.to_string()))?;
@@ -304,7 +312,8 @@ fn list_series_to_images(list_series: &Series) -> Result<Vec<ImageData>> {
             let struct_chunked = list_series
                 .struct_()
                 .map_err(|e| ArrowError::ReadError(e.to_string()))?;
-            let fields = struct_chunked.fields();
+            // In Polars 0.46+, use fields_as_series() instead of fields()
+            let fields = struct_chunked.fields_as_series();
             let mut images = Vec::with_capacity(struct_chunked.len());
 
             for idx in 0..struct_chunked.len() {
@@ -499,6 +508,8 @@ fn list_to_json(list_value: &Series) -> Result<serde_json::Value> {
     Ok(serde_json::Value::Array(values))
 }
 
+use crate::hf_resolver::{HfResolver, ZERO_IMAGE_SIZE};
+
 /// Image data representation
 #[derive(Debug, Clone)]
 pub enum ImageData {
@@ -510,17 +521,47 @@ pub enum ImageData {
 
 impl ImageData {
     /// Get the image bytes, reading from path if needed
+    ///
+    /// If a path cannot be resolved locally, returns a zero tensor (black image)
+    /// to preserve shape without injecting semantic noise into embeddings.
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
+        self.to_bytes_with_resolver(None)
+    }
+
+    /// Get the image bytes with optional HfResolver for remote paths
+    ///
+    /// # Arguments
+    /// * `resolver` - Optional HfResolver for downloading from HuggingFace
+    ///
+    /// # Returns
+    /// * Image bytes, or zero tensor if path cannot be resolved
+    pub fn to_bytes_with_resolver(&self, resolver: Option<&HfResolver>) -> Result<Vec<u8>> {
         match self {
             ImageData::Path(path) => {
-                // Try to read from local file system
+                // Try to read from local file system first
                 if Path::new(path).exists() {
-                    std::fs::read(path).map_err(|e| anyhow::anyhow!("Failed to read image: {}", e))
-                } else {
-                    // Path might be relative to dataset cache
-                    // TODO: Implement path resolution from Hugging Face cache
-                    Err(anyhow::anyhow!("Image path not found: {}", path))
+                    return std::fs::read(path)
+                        .map_err(|e| anyhow::anyhow!("Failed to read image: {}", e));
                 }
+
+                // Try HfResolver if provided
+                if let Some(resolver) = resolver {
+                    match resolver.resolve(path, true)? {
+                        Some(bytes) => return Ok(bytes),
+                        None => {
+                            // skip_missing mode - return zero tensor
+                            return Ok(vec![0u8; ZERO_IMAGE_SIZE]);
+                        }
+                    }
+                }
+
+                // Fallback: return zero tensor instead of error
+                // This preserves tensor shape without semantic noise
+                eprintln!(
+                    "Warning: Image path not found, using zero tensor: {}",
+                    path
+                );
+                Ok(vec![0u8; ZERO_IMAGE_SIZE])
             }
             ImageData::Bytes(bytes) => Ok(bytes.clone()),
         }

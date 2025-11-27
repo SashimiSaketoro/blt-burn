@@ -1,5 +1,6 @@
 #!/bin/bash
 # Install FFmpeg on various platforms (automatic installation for BLT-Burn)
+# Installs both the binary AND development headers needed for Rust bindings
 
 set -e
 
@@ -13,10 +14,9 @@ if [[ "$OSTYPE" == "darwin"* ]]; then
         exit 1
     fi
     
-    # Check if FFmpeg is already installed
-    if command -v ffmpeg &> /dev/null && command -v pkg-config &> /dev/null; then
-        exit 0
-    fi
+    # Determine Homebrew prefix (different for Intel vs Apple Silicon)
+    BREW_PREFIX=$(brew --prefix)
+    echo "ℹ️  Homebrew prefix: $BREW_PREFIX" >&2
     
     # Install pkg-config if missing (required by ffmpeg-sys-next)
     if ! command -v pkg-config &> /dev/null; then
@@ -27,13 +27,37 @@ if [[ "$OSTYPE" == "darwin"* ]]; then
         fi
     fi
     
-    # Install FFmpeg
+    # Install FFmpeg if missing
     if ! command -v ffmpeg &> /dev/null; then
         echo "📦 Installing FFmpeg via Homebrew..." >&2
         if ! brew install ffmpeg; then
             echo "❌ FFmpeg installation failed" >&2
             exit 1
         fi
+    fi
+    
+    # Set up PKG_CONFIG_PATH for Homebrew FFmpeg (needed for ffmpeg-sys-next)
+    FFMPEG_PKG_PATH="$BREW_PREFIX/opt/ffmpeg/lib/pkgconfig"
+    if [ -d "$FFMPEG_PKG_PATH" ]; then
+        echo "✅ FFmpeg pkg-config path: $FFMPEG_PKG_PATH" >&2
+        
+        # Check if pkg-config can find libavcodec
+        export PKG_CONFIG_PATH="$FFMPEG_PKG_PATH:$PKG_CONFIG_PATH"
+        if pkg-config --exists libavcodec 2>/dev/null; then
+            echo "✅ pkg-config can find FFmpeg libraries" >&2
+        else
+            echo "⚠️  pkg-config cannot find FFmpeg. Add to your shell profile:" >&2
+            echo "   export PKG_CONFIG_PATH=\"$FFMPEG_PKG_PATH:\$PKG_CONFIG_PATH\"" >&2
+        fi
+        
+        # Print instructions for shell profile
+        echo "" >&2
+        echo "📋 Add these lines to your ~/.zshrc or ~/.bashrc:" >&2
+        echo "   export PKG_CONFIG_PATH=\"$FFMPEG_PKG_PATH:\$PKG_CONFIG_PATH\"" >&2
+        echo "   export FFMPEG_DIR=\"$BREW_PREFIX/opt/ffmpeg\"" >&2
+    else
+        echo "⚠️  FFmpeg pkgconfig not found at expected location" >&2
+        echo "   Try: brew reinstall ffmpeg" >&2
     fi
     
 elif [[ "$OSTYPE" == "linux-gnu"* ]]; then
@@ -53,19 +77,20 @@ elif [[ "$OSTYPE" == "linux-gnu"* ]]; then
     fi
     
     if [[ $OS == *"Ubuntu"* ]] || [[ $OS == *"Debian"* ]]; then
-        echo "📦 Installing FFmpeg via apt..." >&2
-        if ! sudo apt update && sudo apt install -y ffmpeg; then
+        echo "📦 Installing FFmpeg with development headers via apt..." >&2
+        if ! sudo apt update && sudo apt install -y ffmpeg libavcodec-dev libavformat-dev libswscale-dev libavutil-dev libavfilter-dev libavdevice-dev pkg-config; then
             echo "❌ FFmpeg installation failed" >&2
             exit 1
         fi
     elif [[ $OS == *"Fedora"* ]] || [[ $OS == *"Red Hat"* ]] || [[ $OS == *"CentOS"* ]]; then
-        echo "📦 Installing FFmpeg via dnf..." >&2
-        if ! sudo dnf install -y ffmpeg; then
+        echo "📦 Installing FFmpeg with development headers via dnf..." >&2
+        if ! sudo dnf install -y ffmpeg ffmpeg-devel; then
             echo "❌ FFmpeg installation failed" >&2
             exit 1
         fi
     elif [[ $OS == *"Arch"* ]] || [[ $OS == *"Manjaro"* ]]; then
         echo "📦 Installing FFmpeg via pacman..." >&2
+        # Arch packages include headers by default
         if ! sudo pacman -S --noconfirm ffmpeg; then
             echo "❌ FFmpeg installation failed" >&2
             exit 1

@@ -4,12 +4,13 @@ use blt_burn::{
     dataset::FineWebEduDataset,
     ffmpeg::{self, FfmpegError},
     model::{LMTransformer, LMTransformerConfig},
+    modalities::{detect_modality, PdfMode, PreTokenizerType},
     output::WebDatasetWriter,
     patcher::{patch_lengths_from_start_indices, patch_start_indices_cpu, patch_start_mask_from_entropy_with_monotonicity},
     prefetch::DocumentPrefetcher,
-    pretokenize::detect_modality,
     quantization::{quantize_model, QuantConfig, QuantStats},
     sidecar::{EdgeData, HypergraphBuilder, HypergraphSidecar, NodeData},
+    sphere_ebm::{ScaleProfile as SphereScale, SphereOptimizer},
     tokenizer::BltTokenizer,
 };
 use burn::{
@@ -22,11 +23,12 @@ use burn_import::safetensors::SafetensorsFileRecorder;
 use clap::{Parser, ValueEnum};
 use dialoguer::Select;
 use hypergraph::VertexIndex;
+use ndarray::{Array1, Array2};
 use safetensors::serialize;
 use safetensors::tensor::{Dtype, TensorView};
 use sha2::{Digest, Sha256};
 use std::fs::{self, File};
-use std::io::Write;
+use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 
 /// Output format for ingested data.
@@ -40,6 +42,31 @@ enum OutputFormat {
     Safetensors,
     /// Sharded .tar.gz archives for PyTorch WebDataset streaming
     Webdataset,
+}
+
+/// Scale profile for sphere optimization
+#[derive(Clone, Debug, Default, ValueEnum)]
+enum SphereScaleArg {
+    /// Development scale: 32-512 radius, 120 steps
+    #[default]
+    Dev,
+    /// Medium scale: 64-2048 radius, 240 steps
+    Medium,
+    /// Large scale: 96-8192 radius, 480 steps
+    Large,
+    /// Planetary scale: 128-32768 radius, 960 steps
+    Planetary,
+}
+
+impl From<SphereScaleArg> for SphereScale {
+    fn from(arg: SphereScaleArg) -> Self {
+        match arg {
+            SphereScaleArg::Dev => SphereScale::Dev,
+            SphereScaleArg::Medium => SphereScale::Medium,
+            SphereScaleArg::Large => SphereScale::Large,
+            SphereScaleArg::Planetary => SphereScale::Planetary,
+        }
+    }
 }
 
 /// Build long version string with git hash and feature status.
@@ -150,9 +177,9 @@ struct Args {
     #[arg(long)]
     use_mpk: bool,
 
-    /// Quantization mode for model weights: none (default), int8, int4
-    /// INT8 provides ~2x speedup with minimal accuracy loss
-    /// INT4 provides ~4x compression but may affect embedding quality
+    /// Quantization mode for model weights: none (default), int8, int4.
+    /// INT8 reduces memory bandwidth and can improve inference speed on supported hardware.
+    /// INT4 provides higher compression and may affect embedding quality.
     #[arg(long, default_value = "none")]
     quantize: String,
 
@@ -168,6 +195,18 @@ struct Args {
     /// Print document size distribution statistics
     #[arg(long)]
     batch_stats: bool,
+
+    /// Enable multi-view PDF extraction for cross-modal learning.
+    /// Emits raw bytes, extracted text, and rendered images as separate hypergraph branches.
+    /// All views share a source_id to enable cross-modal association learning.
+    #[arg(long)]
+    multiview_pdf: bool,
+
+    /// PDF extraction mode when multiview is disabled.
+    /// Options: raw_only, text_only (default), image_only
+    /// Ignored when --multiview-pdf is enabled.
+    #[arg(long, default_value = "text_only")]
+    pdf_mode: String,
 
     /// Enable CubeCL kernel profiling (prints kernel timings to stdout)
     #[arg(long)]
@@ -185,6 +224,25 @@ struct Args {
     #[arg(long, default_value_t = 50)]
     histogram_bins: usize,
 
+    /// Enable sphere optimization after ingestion
+    /// Runs Langevin dynamics to place patches on a hypersphere
+    #[arg(long)]
+    sphere: bool,
+
+    /// Scale profile for sphere optimization: dev, medium, large, planetary
+    #[arg(long, value_enum, default_value_t = SphereScaleArg::Dev)]
+    sphere_scale: SphereScaleArg,
+
+    /// Enable entropy-weighted sphere optimization
+    /// Higher entropy patches are placed in outer shells
+    #[arg(long)]
+    entropy_weighted: bool,
+
+    /// Use GPU-accelerated thrml-sphere for sphere optimization (requires --thrml feature)
+    /// Falls back to CPU implementation if thrml feature is not enabled
+    #[arg(long)]
+    use_thrml_sphere: bool,
+
     /// Output format: safetensors (default) or webdataset for PyTorch streaming.
     /// SafeTensors produces individual .safetensors files with .hypergraph.db sidecars.
     /// WebDataset produces sharded .tar.gz archives for efficient PyTorch DataLoader streaming.
@@ -194,6 +252,16 @@ struct Args {
     /// Number of samples per WebDataset shard (only used with --output-format webdataset)
     #[arg(long, default_value_t = 1000)]
     webdataset_shard_size: usize,
+
+    /// Skip missing files instead of using fallbacks (e.g., zero tensors for images).
+    /// Useful for strict mode where you want to know about missing data.
+    #[arg(long)]
+    skip_missing_files: bool,
+
+    /// HuggingFace authentication token for accessing private datasets.
+    /// Also respects the HF_TOKEN environment variable.
+    #[arg(long, env = "HF_TOKEN")]
+    hf_token: Option<String>,
 }
 
 fn compute_hash(data: &[u8]) -> String {
@@ -359,23 +427,40 @@ fn ensure_ffmpeg_interactive(args: &Args) -> Result<(bool, Option<PathBuf>), any
     }
 }
 
+/// Result of sphere optimization.
+///
+/// Planned for future integration with thrml-sphere water-filling output.
+#[allow(dead_code)]
+struct SphereOutput {
+    r: Vec<f32>,
+    theta: Vec<f32>,
+    phi: Vec<f32>,
+    cartesian: Vec<f32>, // flattened [N, 3]
+}
+
 /// Process raw bytes through BLT entropy model to compute patch boundaries.
 /// 
 /// Returns:
 /// - Raw bytes (unchanged input)
 /// - Patch lengths (computed via entropy-based boundary detection)
-/// - Per-byte entropies (for downstream Orch-OR/lasing mode)
+/// - Per-byte entropies (for downstream lasing/coherence mode)
+/// - Per-byte embeddings (flattened [N, 768])
+/// - Per-byte norms (prominence)
 /// - Hypergraph sidecar (metadata)
 fn process_data(
     data: &[u8],
     model: &LMTransformer<Wgpu>,
     device: &WgpuDevice,
     threshold: f64,
+    multiview_pdf: bool,
+    pdf_mode: &str,
 ) -> Result<
     (
         Vec<u8>,    // raw bytes (unchanged)
         Vec<i32>,   // patch_lengths
-        Vec<f32>,   // entropies (per-byte, for downstream aggregation)
+        Vec<f32>,   // entropies (per-byte)
+        Vec<f32>,   // embeddings (flattened [N, 768])
+        Vec<f32>,   // norms/prominence (per-byte)
         HypergraphSidecar,
     ),
     anyhow::Error,
@@ -383,8 +468,22 @@ fn process_data(
     // 1. Compute Hash
     let source_hash = compute_hash(data);
 
-    // 2. Pre-tokenize
-    let pt_type = detect_modality(data);
+    // 2. Pre-tokenize with CLI overrides for PDF mode
+    let pt_type = {
+        let detected = detect_modality(data);
+        
+        // Apply CLI overrides for PDF modality
+        if matches!(detected, PreTokenizerType::Pdf { .. }) {
+            let mode = if multiview_pdf {
+                PdfMode::MultiView
+            } else {
+                pdf_mode.parse().unwrap_or_default()
+            };
+            PreTokenizerType::Pdf { mode }
+        } else {
+            detected
+        }
+    };
     let pretokenizer = pt_type.create()?;
     let modality_name = pretokenizer.modality().to_string();
 
@@ -411,6 +510,8 @@ fn process_data(
             Vec::<u8>::new(),    // raw bytes
             Vec::<i32>::new(),   // patch_lengths
             Vec::<f32>::new(),   // entropies
+            Vec::<f32>::new(),   // embeddings
+            Vec::<f32>::new(),   // norms
             builder.build(),
         ));
     }
@@ -512,8 +613,8 @@ fn process_data(
     let entropies_data = entropies.into_data();
     let coherence_data = coherence_scores.into_data();
 
-    let _embeddings_f32: Vec<f32> = embeddings_data.iter::<f32>().collect();
-    let _norms_f32: Vec<f32> = norms_data.iter::<f32>().collect();
+    let embeddings_f32: Vec<f32> = embeddings_data.iter::<f32>().collect();
+    let norms_f32: Vec<f32> = norms_data.iter::<f32>().collect();
     let entropies_f32: Vec<f32> = entropies_data.iter::<f32>().collect();
     let coherence_f32: Vec<f32> = coherence_data.iter::<f32>().collect();
 
@@ -571,10 +672,10 @@ fn process_data(
         };
 
         // Create segment with patch metadata
-        let seg = blt_burn::pretokenize::ByteSegment {
+        let seg = blt_burn::modalities::ByteSegment {
             bytes: patch_bytes,
             label: Some(format!("patch_{}", patch_idx)),
-            metadata: Some(blt_burn::pretokenize::SegmentMetadata {
+            metadata: Some(blt_burn::modalities::SegmentMetadata {
                 start_offset: start,
                 end_offset: end,
                 confidence: 1.0,
@@ -616,13 +717,265 @@ fn process_data(
     }
     // --- End Hypergraph Builder ---
 
-    // Return raw bytes, patch lengths, and entropies
+    // Build hypergraph, adding cross-view edges for multi-view mode
+    // This creates "same_source" hyperedges connecting all views (raw, text, image) of PDFs
+    let sidecar = if multiview_pdf {
+        builder.build_with_cross_view_edges()
+    } else {
+        builder.build()
+    };
+
+    // Return raw bytes, patch lengths, entropies, embeddings, and norms
     Ok((
         data.to_vec(),       // raw bytes (unchanged)
         patch_lengths_i32,   // length of each patch
-        entropies_f32,       // per-byte entropies for downstream Orch-OR
-        builder.build(),
+        entropies_f32,       // per-byte entropies for downstream lasing/coherence mode
+        embeddings_f32,      // per-byte embeddings [N, 768] flattened
+        norms_f32,           // per-byte norms (prominence)
+        sidecar,
     ))
+}
+
+/// Aggregate token-level data to patch-level for sphere optimization
+fn aggregate_to_patches(
+    embeddings: &[f32],       // [N_tokens * 768]
+    norms: &[f32],            // [N_tokens]
+    entropies: &[f32],        // [N_tokens]
+    patch_lengths: &[i32],    // [N_patches]
+    embed_dim: usize,         // typically 768
+) -> (Array2<f32>, Array1<f32>, Array1<f32>) {
+    let n_patches = patch_lengths.len();
+    let n_tokens = norms.len();
+    
+    if n_patches == 0 || n_tokens == 0 {
+        return (
+            Array2::zeros((0, embed_dim)),
+            Array1::zeros(0),
+            Array1::zeros(0),
+        );
+    }
+    
+    let mut patch_embeddings = Vec::with_capacity(n_patches * embed_dim);
+    let mut patch_prominence = Vec::with_capacity(n_patches);
+    let mut patch_entropies = Vec::with_capacity(n_patches);
+    
+    let mut offset = 0usize;
+    for &len in patch_lengths {
+        let len = len as usize;
+        let end = (offset + len).min(n_tokens);
+        
+        if end > offset {
+            // Mean pool embeddings
+            let mut mean_emb = vec![0.0f32; embed_dim];
+            for t in offset..end {
+                for d in 0..embed_dim {
+                    let idx = t * embed_dim + d;
+                    if idx < embeddings.len() {
+                        mean_emb[d] += embeddings[idx];
+                    }
+                }
+            }
+            let count = (end - offset) as f32;
+            for d in 0..embed_dim {
+                mean_emb[d] /= count;
+            }
+            patch_embeddings.extend(mean_emb);
+            
+            // Max prominence (preserves signal strength)
+            let max_prom = norms[offset..end]
+                .iter()
+                .cloned()
+                .fold(f32::NEG_INFINITY, f32::max);
+            patch_prominence.push(max_prom);
+            
+            // Mean entropy
+            let mean_ent: f32 = entropies[offset..end].iter().sum::<f32>() / count;
+            patch_entropies.push(mean_ent);
+        } else {
+            // Empty patch - fill with zeros
+            patch_embeddings.extend(vec![0.0f32; embed_dim]);
+            patch_prominence.push(0.0);
+            patch_entropies.push(0.0);
+        }
+        
+        offset = end;
+    }
+    
+    let emb_array = Array2::from_shape_vec((n_patches, embed_dim), patch_embeddings)
+        .unwrap_or_else(|_| Array2::zeros((n_patches, embed_dim)));
+    
+    (
+        emb_array,
+        Array1::from_vec(patch_prominence),
+        Array1::from_vec(patch_entropies),
+    )
+}
+
+/// Run sphere optimization and save results (CPU version)
+fn run_sphere_optimization(
+    embeddings: &[f32],
+    norms: &[f32],
+    entropies: &[f32],
+    patch_lengths: &[i32],
+    output_path: &Path,
+    scale: SphereScale,
+    entropy_weighted: bool,
+) -> anyhow::Result<()> {
+    use ndarray_npy::NpzWriter;
+    
+    // Aggregate to patch level
+    let (patch_embeddings, patch_prominence, patch_entropies) = 
+        aggregate_to_patches(embeddings, norms, entropies, patch_lengths, 768);
+    
+    if patch_embeddings.nrows() == 0 {
+        println!("⚠️  Skipping sphere optimization: no patches");
+        return Ok(());
+    }
+    
+    // Create optimizer
+    let optimizer = SphereOptimizer::from_profile(scale)
+        .with_entropy_weighted(entropy_weighted);
+    
+    // Run optimization
+    let entropies_view = if entropy_weighted {
+        Some(patch_entropies.view())
+    } else {
+        None
+    };
+    
+    let coords = optimizer.optimize(
+        patch_embeddings.view(),
+        patch_prominence.view(),
+        entropies_view,
+    );
+    
+    // Save to NPZ
+    let file = File::create(output_path)?;
+    let writer = BufWriter::new(file);
+    let mut npz = NpzWriter::new(writer);
+    npz.add_array("r", &coords.r)?;
+    npz.add_array("theta", &coords.theta)?;
+    npz.add_array("phi", &coords.phi)?;
+    let cart = coords.to_cartesian();
+    npz.add_array("cartesian", &cart)?;
+    npz.add_array("prominence", &patch_prominence)?;
+    if entropy_weighted {
+        npz.add_array("entropies", &patch_entropies)?;
+    }
+    npz.finish()?;
+    
+    println!(
+        "🌐 Sphere optimization (CPU): {} patches → {:?}",
+        coords.r.len(),
+        output_path
+    );
+    
+    Ok(())
+}
+
+/// Run GPU-accelerated sphere optimization using thrml-sphere (requires --features thrml)
+#[cfg(feature = "thrml")]
+fn run_sphere_optimization_gpu(
+    embeddings: &[f32],
+    norms: &[f32],
+    entropies: &[f32],
+    patch_lengths: &[i32],
+    output_path: &Path,
+    scale: SphereScale,
+    entropy_weighted: bool,
+    _device: &WgpuDevice, // Unused - we use thrml's device for consistency
+) -> anyhow::Result<()> {
+    use burn::tensor::Tensor;
+    use thrml_core::backend::WgpuBackend;
+    use thrml_samplers::RngKey;
+    use thrml_sphere::{SphereConfig, ScaleProfile as ThrmlScale, SphereEBM, save_coords_npz};
+    
+    // Aggregate to patch level
+    let (patch_embeddings, patch_prominence, patch_entropies) = 
+        aggregate_to_patches(embeddings, norms, entropies, patch_lengths, 768);
+    
+    let n_patches = patch_embeddings.nrows();
+    let embed_dim = patch_embeddings.ncols();
+    
+    if n_patches == 0 {
+        println!("⚠️  Skipping sphere optimization: no patches");
+        return Ok(());
+    }
+    
+    // Create thrml device first - all tensors must be created on the same device
+    thrml_core::backend::ensure_backend();
+    let thrml_device = thrml_core::backend::init_gpu_device();
+    
+    // Convert ndarray to Burn tensors on the thrml device
+    let emb_flat: Vec<f32> = patch_embeddings.iter().copied().collect();
+    let prom_flat: Vec<f32> = patch_prominence.iter().copied().collect();
+    let ent_flat: Vec<f32> = patch_entropies.iter().copied().collect();
+    
+    let embeddings_tensor: Tensor<WgpuBackend, 1> = 
+        Tensor::from_data(emb_flat.as_slice(), &thrml_device);
+    let embeddings_2d: Tensor<WgpuBackend, 2> = 
+        embeddings_tensor.reshape([n_patches as i32, embed_dim as i32]);
+    
+    let prominence_tensor: Tensor<WgpuBackend, 1> = 
+        Tensor::from_data(prom_flat.as_slice(), &thrml_device);
+    
+    let entropies_tensor: Option<Tensor<WgpuBackend, 1>> = if entropy_weighted {
+        Some(Tensor::from_data(ent_flat.as_slice(), &thrml_device))
+    } else {
+        None
+    };
+    
+    // Convert scale profile
+    let thrml_scale = match scale {
+        SphereScale::Dev => ThrmlScale::Dev,
+        SphereScale::Medium => ThrmlScale::Medium,
+        SphereScale::Large => ThrmlScale::Large,
+        SphereScale::Planetary => ThrmlScale::Planetary,
+    };
+    
+    let config = SphereConfig::from(thrml_scale)
+        .with_entropy_weighted(entropy_weighted);
+    
+    // Create SphereEBM and run optimization
+    let ebm = SphereEBM::new(
+        embeddings_2d,
+        prominence_tensor,
+        entropies_tensor,
+        config,
+        &thrml_device,
+    );
+    
+    let key = RngKey::new(42);
+    let coords = ebm.optimize(key, &thrml_device);
+    
+    // Save results
+    save_coords_npz(&coords, output_path)?;
+    
+    println!(
+        "🌐 Sphere optimization (GPU/thrml): {} patches → {:?}",
+        n_patches,
+        output_path
+    );
+    
+    Ok(())
+}
+
+/// Fallback when thrml feature is not enabled
+#[cfg(not(feature = "thrml"))]
+fn run_sphere_optimization_gpu(
+    _embeddings: &[f32],
+    _norms: &[f32],
+    _entropies: &[f32],
+    _patch_lengths: &[i32],
+    _output_path: &Path,
+    _scale: SphereScale,
+    _entropy_weighted: bool,
+    _device: &WgpuDevice,
+) -> anyhow::Result<()> {
+    anyhow::bail!(
+        "GPU sphere optimization requires the 'thrml' feature. \
+         Build with: cargo build --features thrml"
+    )
 }
 
 fn save_metadata_sidecar(
@@ -648,7 +1001,7 @@ fn save_metadata_sidecar(
 /// Output format:
 /// - `bytes`: [total_bytes] - raw byte values (0-255) concatenated
 /// - `patch_lengths`: [num_patches] - length of each patch
-/// - `entropies`: [total_bytes] - per-byte entropy values for downstream Orch-OR
+/// - `entropies`: [total_bytes] - per-byte entropy values for lasing/coherence optimization
 /// 
 /// To reconstruct patches in Python:
 /// ```python
@@ -672,6 +1025,10 @@ fn save_patch_safetensors(
     bytes: &[u8],
     patch_lengths: &[i32],
     entropies: &[f32],
+    embeddings: Option<&[f32]>,      // [num_patches * embed_dim] flattened
+    prominence: Option<&[f32]>,      // [num_patches]
+    patch_entropies: Option<&[f32]>, // [num_patches] aggregated
+    embed_dim: usize,
     metadata_filename: Option<&str>,
 ) -> anyhow::Result<()> {
     if bytes.is_empty() {
@@ -682,7 +1039,7 @@ fn save_patch_safetensors(
     let num_patches = patch_lengths.len();
     println!("  Saving {} bytes in {} patches", bytes.len(), num_patches);
 
-    let tensors: Vec<(&str, TensorView)> = vec![
+    let mut tensors: Vec<(&str, TensorView)> = vec![
         (
             "bytes",
             TensorView::new(
@@ -712,10 +1069,54 @@ fn save_patch_safetensors(
         ),
     ];
 
+    // Add patch-level embeddings if provided [num_patches, embed_dim]
+    if let Some(emb) = embeddings {
+        tensors.push((
+            "embeddings",
+            TensorView::new(
+                Dtype::F32,
+                vec![num_patches, embed_dim],
+                bytemuck::cast_slice(emb),
+            )
+            .map_err(|e| anyhow::anyhow!("Failed to create embeddings tensor: {}", e))?,
+        ));
+    }
+
+    // Add patch-level prominence if provided [num_patches]
+    if let Some(prom) = prominence {
+        tensors.push((
+            "prominence",
+            TensorView::new(
+                Dtype::F32,
+                vec![num_patches],
+                bytemuck::cast_slice(prom),
+            )
+            .map_err(|e| anyhow::anyhow!("Failed to create prominence tensor: {}", e))?,
+        ));
+    }
+
+    // Add patch-level entropies if provided [num_patches]
+    if let Some(pent) = patch_entropies {
+        tensors.push((
+            "patch_entropies",
+            TensorView::new(
+                Dtype::F32,
+                vec![num_patches],
+                bytemuck::cast_slice(pent),
+            )
+            .map_err(|e| anyhow::anyhow!("Failed to create patch_entropies tensor: {}", e))?,
+        ));
+    }
+
     let mut metadata_map = std::collections::HashMap::new();
-    metadata_map.insert("format".to_string(), "blt_patches_v2".to_string());
+    // Use v3 format if embeddings are included, otherwise v2 for backward compatibility
+    let format_version = if embeddings.is_some() { "blt_patches_v3" } else { "blt_patches_v2" };
+    metadata_map.insert("format".to_string(), format_version.to_string());
     metadata_map.insert("num_patches".to_string(), num_patches.to_string());
     metadata_map.insert("total_bytes".to_string(), bytes.len().to_string());
+    if embeddings.is_some() {
+        metadata_map.insert("embed_dim".to_string(), embed_dim.to_string());
+    }
     if let Some(mf) = metadata_filename {
         metadata_map.insert("metadata_file".to_string(), mf.to_string());
     }
@@ -865,6 +1266,17 @@ fn main() -> anyhow::Result<()> {
     // Handle Hugging Face dataset loading
     if let Some(hf_dataset) = &args.huggingface_dataset {
         println!("🤗 Loading dataset from Hugging Face: {}", hf_dataset);
+        
+        // Set HF_TOKEN if provided via CLI (also works via env var)
+        if let Some(ref token) = args.hf_token {
+            std::env::set_var("HF_TOKEN", token);
+            println!("   🔑 HuggingFace token provided");
+        }
+        
+        // Log skip_missing setting
+        if args.skip_missing_files {
+            println!("   ⚠️  Skip missing files mode enabled (strict mode)");
+        }
 
         // Create tokenizer
         let tokenizer = BltTokenizer::new(false, false); // No BOS/EOS tokens
@@ -901,8 +1313,8 @@ fn main() -> anyhow::Result<()> {
         };
 
         println!("Processing single input ({} bytes)...", bytes.len());
-        match process_data(&bytes, &model, &device, args.threshold) {
-            Ok((raw_bytes, patch_lengths, entropies, sidecar)) => {
+        match process_data(&bytes, &model, &device, args.threshold, args.multiview_pdf, &args.pdf_mode) {
+            Ok((raw_bytes, patch_lengths, entropies, embeddings, norms, sidecar)) => {
                 if !patch_lengths.is_empty() {
                     match args.output_format {
                         OutputFormat::Safetensors => {
@@ -912,7 +1324,12 @@ fn main() -> anyhow::Result<()> {
                             save_metadata_sidecar(&metadata_path, &sidecar, args.export_json_metadata)?;
                             let metadata_db_name = format!("{}.hypergraph.db", metadata_basename);
 
-                            // Save patches with entropies
+                            // Aggregate to patch level for thrml-sphere integration
+                            let embed_dim = 768;
+                            let (patch_emb, patch_prom, patch_ent) = 
+                                aggregate_to_patches(&embeddings, &norms, &entropies, &patch_lengths, embed_dim);
+                            
+                            // Save patches with entropies AND embeddings
                             let path = args
                                 .output_dir
                                 .join(format!("{}.safetensors", filename_prefix));
@@ -921,9 +1338,42 @@ fn main() -> anyhow::Result<()> {
                                 &raw_bytes,
                                 &patch_lengths,
                                 &entropies,
+                                Some(patch_emb.as_slice().unwrap()),
+                                Some(patch_prom.as_slice().unwrap()),
+                                Some(patch_ent.as_slice().unwrap()),
+                                embed_dim,
                                 Some(&metadata_db_name),
                             )?;
-                            println!("✅ Saved: {} ({} patches)", path.display(), patch_lengths.len());
+                            println!("✅ Saved: {} ({} patches, with embeddings)", path.display(), patch_lengths.len());
+                            
+                            // Run sphere optimization if enabled
+                                if args.sphere {
+                                    let sphere_path = args
+                                        .output_dir
+                                        .join(format!("{}.sphere.npz", filename_prefix));
+                                    if args.use_thrml_sphere {
+                                        run_sphere_optimization_gpu(
+                                            &embeddings,
+                                            &norms,
+                                            &entropies,
+                                            &patch_lengths,
+                                            &sphere_path,
+                                            args.sphere_scale.clone().into(),
+                                            args.entropy_weighted,
+                                            &device,
+                                        )?;
+                                    } else {
+                                        run_sphere_optimization(
+                                            &embeddings,
+                                            &norms,
+                                            &entropies,
+                                            &patch_lengths,
+                                            &sphere_path,
+                                            args.sphere_scale.clone().into(),
+                                            args.entropy_weighted,
+                                        )?;
+                                    }
+                                }
                         }
                         OutputFormat::Webdataset => {
                             // Use WebDataset writer for single sample
@@ -951,6 +1401,11 @@ fn main() -> anyhow::Result<()> {
                                 "✅ WebDataset: {} sample(s) in {} shard(s)",
                                 total_samples, total_shards
                             );
+                            
+                            // Note: Sphere optimization for WebDataset would require aggregating across shards
+                            if args.sphere {
+                                println!("⚠️  Sphere optimization with WebDataset format requires post-processing");
+                            }
                         }
                     }
 
@@ -1052,8 +1507,8 @@ fn main() -> anyhow::Result<()> {
 
             // Process document - each doc gets its own hypergraph sidecar
             // This preserves entropy context integrity (no cross-doc bleeding)
-            match process_data(&doc.bytes, &model, &device, args.threshold) {
-                Ok((raw_bytes, patch_lengths, entropies, sidecar)) => {
+            match process_data(&doc.bytes, &model, &device, args.threshold, args.multiview_pdf, &args.pdf_mode) {
+                Ok((raw_bytes, patch_lengths, entropies, embeddings, norms, sidecar)) => {
                     // Accumulate entropies for histogram
                     if args.entropy_histogram {
                         all_entropies.extend_from_slice(&entropies);
@@ -1086,7 +1541,12 @@ fn main() -> anyhow::Result<()> {
                                 save_metadata_sidecar(&metadata_path, &sidecar, args.export_json_metadata)?;
                                 let metadata_db_name = format!("{}.hypergraph.db", metadata_basename);
 
-                                // Save patches with entropies
+                                // Aggregate to patch level for thrml-sphere integration
+                                let embed_dim = 768;
+                                let (patch_emb, patch_prom, patch_ent) = 
+                                    aggregate_to_patches(&embeddings, &norms, &entropies, &patch_lengths, embed_dim);
+
+                                // Save patches with entropies AND embeddings
                                 let filename = format!("item_{}.safetensors", doc.id);
                                 let path = args.output_dir.join(filename);
                                 save_patch_safetensors(
@@ -1094,8 +1554,42 @@ fn main() -> anyhow::Result<()> {
                                     &raw_bytes,
                                     &patch_lengths,
                                     &entropies,
+                                    Some(patch_emb.as_slice().unwrap()),
+                                    Some(patch_prom.as_slice().unwrap()),
+                                    Some(patch_ent.as_slice().unwrap()),
+                                    embed_dim,
                                     Some(&metadata_db_name),
                                 )?;
+                                
+                                // Run sphere optimization if enabled
+                                if args.sphere {
+                                    let sphere_path = args.output_dir.join(format!("item_{}.sphere.npz", doc.id));
+                                    let result = if args.use_thrml_sphere {
+                                        run_sphere_optimization_gpu(
+                                            &embeddings,
+                                            &norms,
+                                            &entropies,
+                                            &patch_lengths,
+                                            &sphere_path,
+                                            args.sphere_scale.clone().into(),
+                                            args.entropy_weighted,
+                                            &device,
+                                        )
+                                    } else {
+                                        run_sphere_optimization(
+                                            &embeddings,
+                                            &norms,
+                                            &entropies,
+                                            &patch_lengths,
+                                            &sphere_path,
+                                            args.sphere_scale.clone().into(),
+                                            args.entropy_weighted,
+                                        )
+                                    };
+                                    if let Err(e) = result {
+                                        println!("⚠️  Sphere optimization failed for {}: {}", doc.id, e);
+                                    }
+                                }
                             }
                         }
                     }
@@ -1147,7 +1641,7 @@ fn main() -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use blt_burn::pretokenize::{ByteSegment, SegmentMetadata};
+    use blt_burn::modalities::{ByteSegment, SegmentMetadata};
     use serde_json::json;
 
     #[test]

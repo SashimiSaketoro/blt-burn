@@ -1,11 +1,7 @@
 use anyhow::Result;
 use flate2::read::GzDecoder;
-use hf_hub::{
-    api::sync::{Api, ApiRepo},
-    Repo, RepoType,
-};
+use hf_hub::{api::sync::ApiRepo, Repo, RepoType};
 use polars::prelude::*;
-use reqwest::blocking::Client;
 use serde_json::{json, Map as JsonMap, Value as JsonValue};
 use std::collections::HashSet;
 use std::fs::{self, File};
@@ -17,25 +13,26 @@ use crate::dataset_helpers::{
     DatasetItemProcessor, DatasetMetadata, DownloadedFile, ModalitySegment, ModalityType,
     SegmentContent,
 };
+use crate::hf_resolver::{
+    encode_path_segments, filename_from_url, looks_like_url, parse_hf_uri, sanitize_path,
+    HfResolver, HfResolverConfig,
+};
 use crate::polars_dataset_loader::{
     extract_binary_value, extract_list_json, extract_struct_json, extract_text_value,
 };
 use crate::polars_ext::hash_ops::hash_bytes;
 use crate::polars_ext::spatial_ops::{extract_bboxes_from_text, serialize_bboxes};
 use crate::reference_sources::{matching_sources, ExternalArchiveSource};
-use urlencoding::encode;
 
 /// Generic Polars-based dataset processor that infers modalities from schema metadata.
 pub struct GenericDatasetProcessor {
     dataset_name: String,
-    http_client: Client,
 }
 
 impl GenericDatasetProcessor {
     pub fn new(dataset_name: &str) -> Self {
         Self {
             dataset_name: dataset_name.to_string(),
-            http_client: Client::new(),
         }
     }
 
@@ -285,81 +282,32 @@ impl GenericDatasetProcessor {
         Ok(targets.into_iter().collect())
     }
 
-    fn download_url(&self, url: &str, dest: &Path) -> Result<()> {
-        if dest.exists() {
-            return Ok(());
-        }
-
-        if let Some(parent) = dest.parent() {
-            fs::create_dir_all(parent)?;
-        }
-
-        let response = self.http_client.get(url).send()?;
-        let bytes = response.bytes()?;
-        fs::write(dest, &bytes)?;
-        Ok(())
-    }
-
-    fn filename_from_url(&self, url: &str) -> String {
-        if let Some(filename) = url.split('/').last() {
-            filename.to_string()
-        } else {
-            use sha2::{Digest, Sha256};
-            let mut hasher = Sha256::new();
-            hasher.update(url.as_bytes());
-            let hash = format!("{:x}", hasher.finalize());
-            format!("file_{}", &hash[..16])
-        }
-    }
-
     fn download_hf_reference(&self, uri: &str, dataset_cache: &Path) -> Result<Option<PathBuf>> {
-        let parsed = match parse_hf_uri_reference(uri) {
-            Some(parsed) => parsed,
-            None => return Ok(None),
-        };
-
-        let api = Api::new()?;
-        let repo = api.repo(Repo::with_revision(
-            parsed.repo_id.clone(),
-            RepoType::Dataset,
-            parsed.revision.clone(),
-        ));
-
-        let relative = sanitize_reference_path(&parsed.path);
-        if relative.as_os_str().is_empty() {
-            return Ok(None);
-        }
-
-        let dest = dataset_cache.join(&relative);
-        if dest.exists() {
-            return Ok(Some(dest));
-        }
-
-        let encoded_path = encode_path_segments(&parsed.path);
-        let debug_url = repo.url(&encoded_path);
-        println!("    Downloading hf reference {} via {}", uri, debug_url);
-
-        match repo.get(&encoded_path) {
-            Ok(source) => {
-                copy_to_cache(&source, &dest)?;
+        let config = HfResolverConfig::new(&self.dataset_name, dataset_cache);
+        let resolver = HfResolver::new(config);
+        
+        let is_image = HfResolver::is_image_path(uri);
+        
+        match resolver.resolve_hf_uri(uri, is_image)? {
+            Some(bytes) => {
+                // Extract path from URI for destination
+                let parsed = match parse_hf_uri(uri) {
+                    Some(p) => p,
+                    None => return Ok(None),
+                };
+                let relative = sanitize_path(&parsed.path);
+                if relative.as_os_str().is_empty() {
+                    return Ok(None);
+                }
+                
+                let dest = dataset_cache.join(&relative);
+                if let Some(parent) = dest.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                fs::write(&dest, &bytes)?;
                 Ok(Some(dest))
             }
-            Err(err) => {
-                println!(
-                    "    Warning: repo.get failed for {} ({:?}), falling back to HTTP",
-                    uri, err
-                );
-                match self.download_via_repo_http(&repo, &encoded_path, &dest) {
-                    Ok(_) => Ok(Some(dest)),
-                    Err(http_err) => {
-                        println!(
-                            "    Warning: HTTP fallback failed for {}: {}",
-                            uri, http_err
-                        );
-                        Ok(None)
-                    }
-                }
-            }
+            None => Ok(None),
         }
     }
 
@@ -369,25 +317,39 @@ impl GenericDatasetProcessor {
         dataset_cache: &Path,
         cache_root: &Path,
     ) -> Result<Option<DownloadedFile>> {
+        let is_image = HfResolver::is_image_path(target);
+        
+        // Handle direct URLs
         if looks_like_url(target) {
-            let filename = self.filename_from_url(target);
+            let filename = filename_from_url(target);
             let dest = dataset_cache.join(&filename);
-            if let Err(err) = self.download_url(target, &dest) {
-                eprintln!("Failed to download {}: {}", target, err);
-                return Ok(None);
+            
+            match HfResolver::resolve_url_with_fallback(target, dataset_cache, is_image, false) {
+                Ok(Some(bytes)) => {
+                    if let Some(parent) = dest.parent() {
+                        fs::create_dir_all(parent).ok();
+                    }
+                    fs::write(&dest, &bytes)?;
+                    
+                    return Ok(Some(DownloadedFile {
+                        url: target.to_string(),
+                        local_path: dest,
+                        file_type: detect_file_type(target).to_string(),
+                        size_bytes: Some(bytes.len() as u64),
+                    }));
+                }
+                Ok(None) => {
+                    println!("    Warning: Unable to resolve URL {}", target);
+                    return Ok(None);
+                }
+                Err(err) => {
+                    eprintln!("Failed to download {}: {}", target, err);
+                    return Ok(None);
+                }
             }
-
-            if let Ok(metadata) = fs::metadata(&dest) {
-                return Ok(Some(DownloadedFile {
-                    url: target.to_string(),
-                    local_path: dest,
-                    file_type: detect_file_type(target).to_string(),
-                    size_bytes: Some(metadata.len()),
-                }));
-            }
-            return Ok(None);
         }
 
+        // Handle hf:// URIs
         if target.starts_with("hf://") {
             match self.download_hf_reference(target, dataset_cache) {
                 Ok(Some(local_path)) => {
@@ -410,6 +372,7 @@ impl GenericDatasetProcessor {
             }
         }
 
+        // Handle dataset assets
         match self.download_dataset_asset(target, dataset_cache, cache_root) {
             Ok(Some(local_path)) => {
                 let size = fs::metadata(&local_path).ok().map(|m| m.len());
@@ -437,7 +400,7 @@ impl GenericDatasetProcessor {
         dataset_cache: &Path,
         cache_root: &Path,
     ) -> Result<Option<PathBuf>> {
-        let relative = sanitize_reference_path(reference);
+        let relative = sanitize_path(reference);
         if relative.as_os_str().is_empty() {
             return Ok(None);
         }
@@ -447,43 +410,29 @@ impl GenericDatasetProcessor {
             return Ok(Some(dest));
         }
 
+        // Check local cache first
         if let Some(local_source) = find_local_dataset_asset(&self.dataset_name, &relative) {
-            copy_to_cache(&local_source, &dest)?;
+            HfResolver::copy_to_cache(&local_source, &dest)?;
             return Ok(Some(dest));
         }
 
-        let api = Api::new()?;
-        let repo = api.repo(Repo::new(self.dataset_name.clone(), RepoType::Dataset));
-        let rel_str = relative.to_string_lossy().to_string();
-        let candidates = [&rel_str, &format!("data/{}", rel_str)];
-
-        for candidate in candidates {
-            let encoded_candidate = encode_path_segments(candidate);
-            let debug_url = repo.url(&encoded_candidate);
-            println!(
-                "    Downloading dataset asset {} via {}",
-                candidate, debug_url
-            );
-            match repo.get(&encoded_candidate) {
-                Ok(source) => {
-                    copy_to_cache(&source, &dest)?;
-                    return Ok(Some(dest));
+        // Try using HfResolver with candidate paths
+        let config = HfResolverConfig::new(&self.dataset_name, dataset_cache);
+        let resolver = HfResolver::new(config);
+        let is_image = HfResolver::is_image_path(reference);
+        
+        match resolver.resolve_with_candidates(reference, is_image)? {
+            Some(bytes) => {
+                if let Some(parent) = dest.parent() {
+                    fs::create_dir_all(parent)?;
                 }
-                Err(err) => {
-                    println!(
-                        "    Warning: repo.get failed for {} ({:?}), falling back to HTTP",
-                        candidate, err
-                    );
-                    if self
-                        .download_via_repo_http(&repo, &encoded_candidate, &dest)
-                        .is_ok()
-                    {
-                        return Ok(Some(dest));
-                    }
-                }
+                fs::write(&dest, &bytes)?;
+                return Ok(Some(dest));
             }
+            None => {}
         }
 
+        // Try external sources as fallback
         if let Some(path) =
             self.try_external_sources(reference, &relative, dataset_cache, cache_root)?
         {
@@ -491,27 +440,6 @@ impl GenericDatasetProcessor {
         }
 
         Ok(None)
-    }
-
-    fn download_via_repo_http(
-        &self,
-        repo: &ApiRepo,
-        encoded_path: &str,
-        dest: &Path,
-    ) -> Result<()> {
-        let url = repo.url(encoded_path);
-        if let Some(parent) = dest.parent() {
-            fs::create_dir_all(parent)?;
-        }
-
-        let response = self.http_client.get(url).send()?;
-        if !response.status().is_success() {
-            anyhow::bail!("HTTP {} fetching {}", response.status(), encoded_path);
-        }
-
-        let bytes = response.bytes()?;
-        fs::write(dest, &bytes)?;
-        Ok(())
     }
 
     fn try_external_sources(
@@ -557,8 +485,9 @@ impl GenericDatasetProcessor {
             return Ok(None);
         }
 
-        let trimmed_path = sanitize_reference_path(trimmed);
-        let api = Api::new()?;
+        let trimmed_path = sanitize_path(trimmed);
+        // Use shared API from hf_resolver for archive fetching
+        let api = crate::hf_resolver::get_api()?;
         let repo = api.repo(Repo::new(
             source.remote_dataset.to_string(),
             RepoType::Dataset,
@@ -681,76 +610,11 @@ fn value_to_reference(value: &JsonValue) -> Option<String> {
     }
 }
 
-fn sanitize_reference_path(reference: &str) -> PathBuf {
-    let mut path = PathBuf::new();
-    for segment in reference.split(['/', '\\']) {
-        if segment.is_empty() || segment == "." || segment == ".." {
-            continue;
-        }
-        path.push(segment);
-    }
-    path
-}
-
-fn encode_path_segments(path: &str) -> String {
-    path.split('/')
-        .map(|segment| encode(segment).to_string())
-        .collect::<Vec<_>>()
-        .join("/")
-}
-
-fn copy_to_cache(source: &Path, dest: &Path) -> Result<()> {
-    if dest.exists() {
-        return Ok(());
-    }
-
-    if let Some(parent) = dest.parent() {
-        fs::create_dir_all(parent)?;
-    }
-
-    fs::copy(source, dest)?;
-    Ok(())
-}
-
 fn find_local_dataset_asset(dataset_name: &str, relative: &Path) -> Option<PathBuf> {
     dataset_cache_dir(dataset_name)
         .ok()
         .map(|dir| dir.join(relative))
         .filter(|candidate| candidate.exists())
-}
-
-#[derive(Clone)]
-struct ParsedHfUri {
-    repo_id: String,
-    revision: String,
-    path: String,
-}
-
-fn parse_hf_uri_reference(uri: &str) -> Option<ParsedHfUri> {
-    const PREFIX: &str = "hf://datasets/";
-    let rest = uri.strip_prefix(PREFIX)?;
-    let mut parts = rest.splitn(3, '/');
-    let owner = parts.next()?;
-    let dataset_part = parts.next()?;
-    let path = parts.next().unwrap_or("").to_string();
-    if path.is_empty() {
-        return None;
-    }
-
-    let (dataset_name, revision) = if let Some(idx) = dataset_part.find('@') {
-        (
-            dataset_part[..idx].to_string(),
-            dataset_part[idx + 1..].to_string(),
-        )
-    } else {
-        (dataset_part.to_string(), "main".to_string())
-    };
-
-    Some(ParsedHfUri {
-        repo_id: format!("{}/{}", owner, dataset_name),
-        revision,
-        path,
-    })
 }
 
 fn infer_modality(column_name: &str, dtype: &DataType) -> ModalityType {
@@ -774,13 +638,6 @@ fn infer_modality(column_name: &str, dtype: &DataType) -> ModalityType {
     } else {
         ModalityType::Unknown(column_name.to_string())
     }
-}
-
-fn looks_like_url(value: &str) -> bool {
-    value.starts_with("http://")
-        || value.starts_with("https://")
-        || value.starts_with("s3://")
-        || value.starts_with("gs://")
 }
 
 fn looks_like_reference_column(column: &str) -> bool {

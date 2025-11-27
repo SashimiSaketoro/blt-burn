@@ -1,4 +1,4 @@
-use crate::pretokenize::ByteSegment;
+use crate::modalities::ByteSegment;
 use bincode;
 use hypergraph::{HyperedgeIndex, Hypergraph, VertexIndex};
 use rusqlite::{params, Connection};
@@ -326,6 +326,69 @@ impl HypergraphBuilder {
         e
     }
 
+    /// Add cross-view hyperedges connecting nodes that share the same source_id.
+    ///
+    /// This is used for multi-view learning, where different representations
+    /// of the same content (raw, text, image) should be linked in the graph
+    /// and can be encouraged to stay close in the embedding space.
+    ///
+    /// Creates `same_source` hyperedges between all leaf nodes sharing a source_id.
+    pub fn add_cross_view_edges(&mut self) {
+        // Collect leaf nodes by their source_id
+        let mut source_groups: HashMap<String, Vec<VertexIndex>> = HashMap::new();
+
+        for (vertex_idx, node_idx) in &self.vertex_map {
+            if let Some(NodeData::Leaf(segment)) = self.nodes.get(*node_idx) {
+                if let Some(ref metadata) = segment.metadata {
+                    if let Some(ref extra) = metadata.extra {
+                        if let Some(source_id) = extra.get("source_id").and_then(|v| v.as_str()) {
+                            source_groups
+                                .entry(source_id.to_string())
+                                .or_insert_with(Vec::new)
+                                .push(*vertex_idx);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Create hyperedges for groups with multiple views
+        for (_source_id, vertices) in source_groups {
+            if vertices.len() > 1 {
+                // Create a single hyperedge connecting all views of this source
+                self.add_hyperedge(
+                    vertices,
+                    EdgeData {
+                        label: "same_source".to_string(),
+                        weight: 1.0, // Full identity weight for cross-view association
+                    },
+                );
+            }
+        }
+    }
+
+    /// Get all nodes that share a source_id (for debugging/inspection).
+    pub fn get_cross_view_groups(&self) -> HashMap<String, Vec<usize>> {
+        let mut source_groups: HashMap<String, Vec<usize>> = HashMap::new();
+
+        for (_, node_idx) in &self.vertex_map {
+            if let Some(NodeData::Leaf(segment)) = self.nodes.get(*node_idx) {
+                if let Some(ref metadata) = segment.metadata {
+                    if let Some(ref extra) = metadata.extra {
+                        if let Some(source_id) = extra.get("source_id").and_then(|v| v.as_str()) {
+                            source_groups
+                                .entry(source_id.to_string())
+                                .or_insert_with(Vec::new)
+                                .push(*node_idx);
+                        }
+                    }
+                }
+            }
+        }
+
+        source_groups
+    }
+
     /// Build the final serializable sidecar DTO
     pub fn build(self) -> HypergraphSidecar {
         HypergraphSidecar {
@@ -337,6 +400,15 @@ impl HypergraphBuilder {
             sharding: None,
             replication: None,
         }
+    }
+
+    /// Build with cross-view edges enabled (for multiview mode).
+    ///
+    /// This automatically adds `same_source` hyperedges connecting
+    /// nodes that represent different views of the same content.
+    pub fn build_with_cross_view_edges(mut self) -> HypergraphSidecar {
+        self.add_cross_view_edges();
+        self.build()
     }
 
     /// Build with sharding information

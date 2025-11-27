@@ -6,7 +6,7 @@ Welcome to the BLT-Burn library documentation!
 
 **New to this library?** Start here:
 
-1. **[API_REFERENCE.md](./API_REFERENCE.md)** - Comprehensive library reference
+1. **[API_REFERENCE.md](./API_REFERENCE.md)** - Library reference
    - Architecture overview
    - Complete API documentation  
    - Usage examples
@@ -104,9 +104,12 @@ blt-burn/
 ├── src/
 │   ├── model.rs       # BLT transformer
 │   ├── tokenizer.rs   # Text tokenization
-│   ├── pretokenize.rs # Multimodal pre-tokenization
+│   ├── hf_resolver.rs # HuggingFace path resolution
+│   ├── modalities/    # Multimodal pre-tokenization
 │   ├── patcher.rs     # Entropy & patch extraction
-│   └── dataset.rs     # FineWeb-Edu utilities
+│   ├── dataset.rs     # FineWeb-Edu utilities
+│   ├── generic_processor.rs  # Schema-inferred processing
+│   └── polars_dataset_loader.rs  # Polars-based HF loading
 ├── scripts/
 │   └── water_filling_integration.py  # Python sphere algorithms
 └── README.md          # Project quick start
@@ -120,5 +123,5 @@ blt-burn/
 
 ---
 
-**Last Updated**: 2025-11-24  
-**Version**: 0.3.0
+**Last Updated**: 2025-11-26  
+**Version**: 0.7.0

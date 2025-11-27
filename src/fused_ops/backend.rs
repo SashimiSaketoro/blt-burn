@@ -69,8 +69,8 @@ impl<R: CubeRuntime, F: FloatElement, I: IntElement, BT: BoolElement> FusedOpsBa
                 &logits.client,
                 cube_count,
                 cube_dim,
-                logits.as_tensor_arg(1),
-                output.as_tensor_arg(1),
+                logits.as_tensor_arg::<F>(1),
+                output.as_tensor_arg::<F>(1),
                 ScalarArg::new(vocab_size as u32),
             );
         } else {
@@ -84,8 +84,8 @@ impl<R: CubeRuntime, F: FloatElement, I: IntElement, BT: BoolElement> FusedOpsBa
                 &logits.client,
                 cube_count,
                 cube_dim,
-                logits.as_tensor_arg(1),
-                output.as_tensor_arg(1),
+                logits.as_tensor_arg::<F>(1),
+                output.as_tensor_arg::<F>(1),
                 ScalarArg::new(vocab_size as u32),
             );
         }
@@ -136,9 +136,9 @@ impl<R: CubeRuntime, F: FloatElement, I: IntElement, BT: BoolElement> FusedOpsBa
                 &input.client,
                 cube_count,
                 cube_dim,
-                input.as_tensor_arg(1),
-                weight.as_tensor_arg(1),
-                output.as_tensor_arg(1),
+                input.as_tensor_arg::<F>(1),
+                weight.as_tensor_arg::<F>(1),
+                output.as_tensor_arg::<F>(1),
                 ScalarArg::new(dim as u32),
             );
         } else {
@@ -151,9 +151,9 @@ impl<R: CubeRuntime, F: FloatElement, I: IntElement, BT: BoolElement> FusedOpsBa
                 &input.client,
                 cube_count,
                 cube_dim,
-                input.as_tensor_arg(1),
-                weight.as_tensor_arg(1),
-                output.as_tensor_arg(1),
+                input.as_tensor_arg::<F>(1),
+                weight.as_tensor_arg::<F>(1),
+                output.as_tensor_arg::<F>(1),
                 ScalarArg::new(dim as u32),
             );
         }
@@ -187,8 +187,8 @@ impl<R: CubeRuntime, F: FloatElement, I: IntElement, BT: BoolElement> FusedOpsBa
             &input.client,
             cube_count,
             cube_dim,
-            input.as_tensor_arg(1),
-            output.as_tensor_arg(1),
+            input.as_tensor_arg::<F>(1),
+            output.as_tensor_arg::<F>(1),
             ScalarArg::new(dim_size as u32),
         );
 
@@ -229,8 +229,8 @@ impl<R: CubeRuntime, F: FloatElement, I: IntElement, BT: BoolElement> FusedOpsBa
                 &input.client,
                 cube_count,
                 cube_dim,
-                input.as_tensor_arg(1),
-                output.as_tensor_arg(1),
+                input.as_tensor_arg::<F>(1),
+                output.as_tensor_arg::<F>(1),
                 ScalarArg::new(dim as u32),
             );
         } else {
@@ -243,8 +243,8 @@ impl<R: CubeRuntime, F: FloatElement, I: IntElement, BT: BoolElement> FusedOpsBa
                 &input.client,
                 cube_count,
                 cube_dim,
-                input.as_tensor_arg(1),
-                output.as_tensor_arg(1),
+                input.as_tensor_arg::<F>(1),
+                output.as_tensor_arg::<F>(1),
                 ScalarArg::new(dim as u32),
             );
         }
@@ -281,9 +281,9 @@ impl<R: CubeRuntime, F: FloatElement, I: IntElement, BT: BoolElement> FusedOpsBa
             &gate_input.client,
             cube_count,
             cube_dim,
-            gate_input.as_tensor_arg(1),
-            up_input.as_tensor_arg(1),
-            output.as_tensor_arg(1),
+            gate_input.as_tensor_arg::<F>(1),
+            up_input.as_tensor_arg::<F>(1),
+            output.as_tensor_arg::<F>(1),
         );
 
         output
@@ -321,9 +321,9 @@ impl<R: CubeRuntime, F: FloatElement, I: IntElement, BT: BoolElement> FusedOpsBa
             &norms.client,
             cube_count,
             cube_dim,
-            norms.as_tensor_arg(1),
-            entropies.as_tensor_arg(1),
-            output.as_tensor_arg(1),
+            norms.as_tensor_arg::<F>(1),
+            entropies.as_tensor_arg::<F>(1),
+            output.as_tensor_arg::<F>(1),
         );
 
         output

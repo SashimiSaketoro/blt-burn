@@ -8,7 +8,7 @@ pub fn hash_blake3(input: &Series) -> PolarsResult<Series> {
         .into_iter()
         .map(|opt_bytes| opt_bytes.map(|bytes| hash_bytes(bytes)))
         .collect();
-    Ok(Series::new(input.name(), hashes))
+    Ok(Series::new(input.name().clone(), hashes))
 }
 
 /// Convenience helper for hashing arbitrary byte slices (used outside of expressions).

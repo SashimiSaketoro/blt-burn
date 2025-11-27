@@ -5,7 +5,7 @@ use burn::tensor::{backend::Backend, Int, Tensor};
 /// Compute entropy from logits using the fused CubeCL kernel.
 ///
 /// This version uses a single fused kernel that combines softmax, log,
-/// multiplication, and reduction for 3-5x better performance.
+/// multiplication, and reduction to reduce kernel launch overhead and memory traffic.
 ///
 /// # Arguments
 /// * `scores` - Input logits tensor of shape `[batch, seq_len, vocab_size]`

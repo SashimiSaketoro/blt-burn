@@ -8,8 +8,9 @@
 /// - Parquet files (auto-converted by Hugging Face)
 /// - Arrow IPC files (from cache)
 use crate::arrow_reader::{find_arrow_file, find_dataset_file, find_dataset_info_file};
+use crate::hf_resolver::{get_api, parse_hf_uri, ParsedHfUri};
 use anyhow::{Context, Result};
-use hf_hub::{api::sync::Api, Repo, RepoType};
+use hf_hub::{Repo, RepoType};
 use polars::io::ipc::IpcReader;
 use polars::prelude::*;
 use serde::Deserialize;
@@ -196,7 +197,7 @@ fn load_json_file(path: &Path, limit: Option<usize>) -> Result<DataFrame> {
 }
 
 fn download_json_from_hub(dataset_name: &str, candidates: &[String]) -> Result<Option<PathBuf>> {
-    let api = Api::new().map_err(|e| DatasetLoaderError::HubError(e.to_string()))?;
+    let api = get_api().map_err(|e| DatasetLoaderError::HubError(e.to_string()))?;
     let repo = api.repo(Repo::new(dataset_name.to_string(), RepoType::Dataset));
 
     for candidate in candidates {
@@ -229,19 +230,19 @@ fn json_array_to_dataframe(items: &[serde_json::Value]) -> Result<DataFrame> {
         }
     }
 
-    // Build Series for each column
-    let mut series_vec = Vec::new();
+    // Build Columns for each column (Polars 0.46+ uses Column instead of Series)
+    let mut columns_vec = Vec::new();
 
     for key in all_keys {
         let values: Vec<Option<serde_json::Value>> =
             items.iter().map(|item| item.get(&key).cloned()).collect();
 
-        // Convert values to Series based on type
+        // Convert values to Series, then to Column (Polars 0.46+)
         let series = json_values_to_series(&key, &values)?;
-        series_vec.push(series);
+        columns_vec.push(series.into_column());
     }
 
-    DataFrame::new(series_vec).map_err(|e| DatasetLoaderError::ReadError(e.to_string()).into())
+    DataFrame::new(columns_vec).map_err(|e| DatasetLoaderError::ReadError(e.to_string()).into())
 }
 
 /// Convert JSON values to a Polars Series
@@ -258,7 +259,7 @@ fn json_values_to_series(name: &str, values: &[Option<serde_json::Value>]) -> Re
                         .and_then(|val| val.as_str().map(|s| s.to_string()))
                 })
                 .collect();
-            Ok(Series::new(name, strings))
+            Ok(Series::new(name.into(), strings))
         }
         Some(serde_json::Value::Number(n)) => {
             if n.is_i64() {
@@ -266,20 +267,20 @@ fn json_values_to_series(name: &str, values: &[Option<serde_json::Value>]) -> Re
                     .iter()
                     .map(|v| v.as_ref().and_then(|val| val.as_i64()))
                     .collect();
-                Ok(Series::new(name, ints))
+                Ok(Series::new(name.into(), ints))
             } else if n.is_f64() {
                 let floats: Vec<Option<f64>> = values
                     .iter()
                     .map(|v| v.as_ref().and_then(|val| val.as_f64()))
                     .collect();
-                Ok(Series::new(name, floats))
+                Ok(Series::new(name.into(), floats))
             } else {
                 // Fallback to string
                 let strings: Vec<Option<String>> = values
                     .iter()
                     .map(|v| v.as_ref().map(|val| val.to_string()))
                     .collect();
-                Ok(Series::new(name, strings))
+                Ok(Series::new(name.into(), strings))
             }
         }
         Some(serde_json::Value::Bool(_)) => {
@@ -287,19 +288,71 @@ fn json_values_to_series(name: &str, values: &[Option<serde_json::Value>]) -> Re
                 .iter()
                 .map(|v| v.as_ref().and_then(|val| val.as_bool()))
                 .collect();
-            Ok(Series::new(name, bools))
+            Ok(Series::new(name.into(), bools))
         }
-        Some(serde_json::Value::Array(_)) => {
-            // For arrays (like images), store as JSON strings for now
-            // Can be improved later to use proper List types
-            let strings: Vec<Option<String>> = values
-                .iter()
-                .map(|v| {
-                    v.as_ref()
-                        .map(|val| serde_json::to_string(val).unwrap_or_default())
-                })
-                .collect();
-            Ok(Series::new(name, strings))
+        Some(serde_json::Value::Array(first_arr)) => {
+            // Determine inner element type from first array's first element
+            let inner_type = first_arr.first();
+
+            match inner_type {
+                Some(serde_json::Value::String(_)) => {
+                    // Array of strings - create proper list
+                    let lists: Vec<Option<Series>> = values
+                        .iter()
+                        .map(|v| {
+                            v.as_ref().and_then(|val| val.as_array()).map(|arr| {
+                                let strings: Vec<Option<&str>> =
+                                    arr.iter().map(|item| item.as_str()).collect();
+                                Series::new("".into(), strings)
+                            })
+                        })
+                        .collect();
+
+                    // Convert to List series
+                    let list_series: Vec<Option<Series>> = lists;
+                    Ok(Series::new(name.into(), list_series))
+                }
+                Some(serde_json::Value::Number(n)) if n.is_f64() => {
+                    // Array of floats
+                    let lists: Vec<Option<Series>> = values
+                        .iter()
+                        .map(|v| {
+                            v.as_ref().and_then(|val| val.as_array()).map(|arr| {
+                                let floats: Vec<Option<f64>> =
+                                    arr.iter().map(|item| item.as_f64()).collect();
+                                Series::new("".into(), floats)
+                            })
+                        })
+                        .collect();
+                    Ok(Series::new(name.into(), lists))
+                }
+                Some(serde_json::Value::Number(_)) => {
+                    // Array of integers
+                    let lists: Vec<Option<Series>> = values
+                        .iter()
+                        .map(|v| {
+                            v.as_ref().and_then(|val| val.as_array()).map(|arr| {
+                                let ints: Vec<Option<i64>> =
+                                    arr.iter().map(|item| item.as_i64()).collect();
+                                Series::new("".into(), ints)
+                            })
+                        })
+                        .collect();
+                    Ok(Series::new(name.into(), lists))
+                }
+                _ => {
+                    // Complex nested types: fallback to JSON strings
+                    // This handles arrays of objects, nested arrays, etc.
+                    let strings: Vec<Option<String>> = values
+                        .iter()
+                        .map(|v| {
+                            v.as_ref()
+                                .map(|val| serde_json::to_string(val).unwrap_or_default())
+                        })
+                        .collect();
+                    Ok(Series::new(name.into(), strings))
+                }
+            }
         }
         Some(serde_json::Value::Object(_)) => {
             // For objects, serialize to JSON string
@@ -310,12 +363,12 @@ fn json_values_to_series(name: &str, values: &[Option<serde_json::Value>]) -> Re
                         .map(|val| serde_json::to_string(val).unwrap_or_default())
                 })
                 .collect();
-            Ok(Series::new(name, strings))
+            Ok(Series::new(name.into(), strings))
         }
         Some(serde_json::Value::Null) | None => {
             // All nulls - use string type as fallback
             let strings: Vec<Option<String>> = values.iter().map(|_| None).collect();
-            Ok(Series::new(name, strings))
+            Ok(Series::new(name.into(), strings))
         }
     }
 }
@@ -424,10 +477,10 @@ fn download_parquet_from_hub(dataset_name: &str, split: &str) -> Result<Option<P
         return Ok(None);
     }
 
-    let api = Api::new().map_err(|e| DatasetLoaderError::HubError(e.to_string()))?;
+    let api = get_api().map_err(|e| DatasetLoaderError::HubError(e.to_string()))?;
 
     for uri in uris.drain(..) {
-        match download_hf_uri(&api, &uri) {
+        match download_hf_uri(api, &uri) {
             Ok(path) => return Ok(Some(path)),
             Err(err) => println!("    Failed to download {}: {}", uri.path, err),
         }
@@ -457,7 +510,7 @@ fn load_dataset_info_manifest(dataset_name: &str) -> Result<Option<DatasetInfoMa
         }
     }
 
-    let api = Api::new().map_err(|e| DatasetLoaderError::HubError(e.to_string()))?;
+    let api = get_api().map_err(|e| DatasetLoaderError::HubError(e.to_string()))?;
     let repo = api.repo(Repo::new(dataset_name.to_string(), RepoType::Dataset));
     match repo.get("dataset_info.json") {
         Ok(path) => read_manifest_from_path(&path).map(Some),
@@ -474,39 +527,8 @@ fn read_manifest_from_path(path: &Path) -> Result<DatasetInfoManifest> {
     serde_json::from_str(&contents).map_err(|e| DatasetLoaderError::ReadError(e.to_string()).into())
 }
 
-#[derive(Debug, Clone)]
-struct HfDatasetUri {
-    repo_id: String,
-    revision: String,
-    path: String,
-}
-
-fn parse_hf_uri(uri: &str) -> Option<HfDatasetUri> {
-    const PREFIX: &str = "hf://datasets/";
-    let rest = uri.strip_prefix(PREFIX)?;
-    let mut segments = rest.splitn(3, '/');
-    let owner = segments.next()?;
-    let dataset_part = segments.next()?;
-    let remaining_path = segments.next().unwrap_or("").to_string();
-
-    if remaining_path.is_empty() {
-        return None;
-    }
-
-    let (dataset_name, revision) = if let Some(idx) = dataset_part.find('@') {
-        (&dataset_part[..idx], dataset_part[idx + 1..].to_string())
-    } else {
-        (dataset_part, "main".to_string())
-    };
-
-    Some(HfDatasetUri {
-        repo_id: format!("{}/{}", owner, dataset_name),
-        revision,
-        path: remaining_path,
-    })
-}
-
-fn download_hf_uri(api: &Api, uri: &HfDatasetUri) -> Result<PathBuf> {
+/// Download a file from HuggingFace using a parsed URI
+fn download_hf_uri(api: &hf_hub::api::sync::Api, uri: &ParsedHfUri) -> Result<PathBuf> {
     let repo = api.repo(Repo::with_revision(
         uri.repo_id.clone(),
         RepoType::Dataset,
@@ -542,8 +564,18 @@ pub fn row_to_json_value(df: &DataFrame, row_idx: usize) -> Result<serde_json::V
     Ok(serde_json::Value::Object(obj))
 }
 
-/// Convert a Series value at a specific index to JSON
-fn series_value_to_json(series: &Series, idx: usize) -> Result<serde_json::Value> {
+/// Convert a Column value at a specific index to JSON
+/// 
+/// In Polars 0.46+, DataFrame.column() returns Column instead of Series.
+/// This function handles the Column type and delegates to series_to_json.
+fn series_value_to_json(column: &polars::frame::column::Column, idx: usize) -> Result<serde_json::Value> {
+    // Get the underlying series from the column
+    let series = column.as_materialized_series();
+    series_to_json(series, idx)
+}
+
+/// Convert a Series value at a specific index to JSON (internal helper)
+fn series_to_json(series: &Series, idx: usize) -> Result<serde_json::Value> {
     match series.dtype() {
         DataType::String => {
             let s = series
@@ -598,24 +630,26 @@ fn series_value_to_json(series: &Series, idx: usize) -> Result<serde_json::Value
             // Now convert each value in the exploded series to JSON
             let mut json_array = Vec::new();
             for i in 0..exploded.len() {
-                let value = series_value_to_json(&exploded, i)?;
+                let value = series_to_json(&exploded, i)?;
                 json_array.push(value);
             }
 
             Ok(serde_json::Value::Array(json_array))
         }
         DataType::Struct(_) => {
-            // For structs, convert to JSON object
+            // For structs, convert to JSON object using struct_() fields
             let struct_series = series
                 .struct_()
                 .map_err(|e| DatasetLoaderError::ReadError(e.to_string()))?;
-            let fields = struct_series.fields();
-
+            
+            // In Polars 0.46+, iterate over fields using fields_as_series()
+            let field_series = struct_series.fields_as_series();
+            
             let mut map = serde_json::Map::new();
-            for field in fields {
-                let field_name = field.name();
-                let value = series_value_to_json(&field, idx)?;
-                map.insert(field_name.to_string(), value);
+            for field in field_series.iter() {
+                let field_name = field.name().to_string();
+                let value = series_to_json(field, idx)?;
+                map.insert(field_name, value);
             }
 
             Ok(serde_json::Value::Object(map))
@@ -635,9 +669,12 @@ fn series_value_to_json(series: &Series, idx: usize) -> Result<serde_json::Value
 
 /// Extract a column as bytes (e.g. for images or binary data) without full JSON serialization
 pub fn get_column_as_bytes(df: &DataFrame, row_idx: usize, column_name: &str) -> Result<Vec<u8>> {
-    let series = df
+    let column = df
         .column(column_name)
         .map_err(|_| DatasetLoaderError::ReadError(format!("Column {} not found", column_name)))?;
+
+    // Get the underlying series from the column (Polars 0.46+)
+    let series = column.as_materialized_series();
 
     if row_idx >= series.len() {
         return Err(
@@ -667,7 +704,7 @@ pub fn get_column_as_bytes(df: &DataFrame, row_idx: usize, column_name: &str) ->
         DataType::List(_) => {
             // Handle List<Binary> or List<String> or other lists
             // We serialize the list content to JSON bytes as a fallback
-            let json_val = series_value_to_json(series, row_idx)?;
+            let json_val = series_value_to_json(column, row_idx)?;
             Ok(serde_json::to_vec(&json_val)?)
         }
         _ => {
@@ -684,9 +721,12 @@ pub fn extract_text_value(
     row_idx: usize,
     column_name: &str,
 ) -> Result<Option<String>> {
-    let series = df
+    let column = df
         .column(column_name)
         .map_err(|_| DatasetLoaderError::ReadError(format!("Column {} not found", column_name)))?;
+
+    // Get the underlying series from the column (Polars 0.46+)
+    let series = column.as_materialized_series();
 
     if row_idx >= series.len() {
         return Ok(None);
@@ -735,9 +775,12 @@ pub fn extract_binary_value(
     row_idx: usize,
     column_name: &str,
 ) -> Result<Option<Vec<u8>>> {
-    let series = df
+    let column = df
         .column(column_name)
         .map_err(|_| DatasetLoaderError::ReadError(format!("Column {} not found", column_name)))?;
+
+    // Get the underlying series from the column (Polars 0.46+)
+    let series = column.as_materialized_series();
 
     if row_idx >= series.len() {
         return Ok(None);
@@ -755,7 +798,7 @@ pub fn extract_binary_value(
             .get(row_idx)
             .map(|s| s.as_bytes().to_vec()),
         DataType::List(_) | DataType::Struct(_) => {
-            let json = series_value_to_json(series, row_idx)?;
+            let json = series_value_to_json(column, row_idx)?;
             let bytes = serde_json::to_vec(&json)?;
             Some(bytes)
         }
@@ -776,15 +819,15 @@ pub fn extract_list_json(
     row_idx: usize,
     column_name: &str,
 ) -> Result<Option<serde_json::Value>> {
-    let series = df
+    let column = df
         .column(column_name)
         .map_err(|_| DatasetLoaderError::ReadError(format!("Column {} not found", column_name)))?;
 
-    if !matches!(series.dtype(), DataType::List(_)) {
+    if !matches!(column.dtype(), DataType::List(_)) {
         return Ok(None);
     }
 
-    let value = series_value_to_json(series, row_idx)?;
+    let value = series_value_to_json(column, row_idx)?;
     if value.is_array() {
         Ok(Some(value))
     } else {
@@ -798,15 +841,15 @@ pub fn extract_struct_json(
     row_idx: usize,
     column_name: &str,
 ) -> Result<Option<serde_json::Value>> {
-    let series = df
+    let column = df
         .column(column_name)
         .map_err(|_| DatasetLoaderError::ReadError(format!("Column {} not found", column_name)))?;
 
-    if !matches!(series.dtype(), DataType::Struct(_)) {
+    if !matches!(column.dtype(), DataType::Struct(_)) {
         return Ok(None);
     }
 
-    let value = series_value_to_json(series, row_idx)?;
+    let value = series_value_to_json(column, row_idx)?;
     if value.is_object() {
         Ok(Some(value))
     } else {

@@ -806,7 +806,7 @@ impl VideoPreTokenizer {
                     frame_count += 1;
 
                     // Sample every N frames based on frame rate
-                    if frame_count % (self.frame_rate as i64 / 2).max(1) != 0 {
+                    if frame_count % (self._frame_rate as i64 / 2).max(1) != 0 {
                         continue;
                     }
                 }
@@ -891,7 +891,7 @@ impl ModalityPreTokenizer for BinaryPreTokenizer {
 #[derive(Debug)]
 pub enum PreTokenizerType {
     TextSimple,
-    TextRaw, // NEW: True BLT style
+    TextRaw, // Raw UTF-8 in the original BLT style
     TextFromFile { path: String },
     Image { patch_size: usize, stride: usize },
     Audio { frame_size: usize, sample_rate: u32 },

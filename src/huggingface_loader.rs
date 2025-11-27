@@ -10,9 +10,10 @@ use std::path::Path;
 
 use crate::blt_core::{process_bytes_with_embeddings, BltConfig, BltExampleWithEmbeddings};
 use crate::dataset_helpers::{create_processor, ModalitySegment, SegmentContent};
+use crate::hf_resolver::{HfResolver, HfResolverConfig, ZERO_IMAGE_SIZE};
 use crate::model::LMTransformer;
+use crate::modalities::{ByteSegment, SegmentMetadata};
 use crate::polars_dataset_loader;
-use crate::pretokenize::{ByteSegment, SegmentMetadata};
 use crate::sidecar::{EdgeData, HypergraphBuilder, HypergraphSidecar, NodeData};
 use crate::tokenizer::BltTokenizer;
 
@@ -377,15 +378,48 @@ fn convert_to_byte_segments(
                     if full_path.exists() {
                         fs::read(&full_path)?
                     } else {
-                        // If file doesn't exist, check if it's an image path from Arrow
-                        // that we should have loaded but didn't
-                        println!("    Warning: File not found: {}, using placeholder", path);
-                        format!("[FILE: {}]", path).into_bytes()
+                        // Use HfResolver for missing files - downloads from HF or uses zero tensor
+                        let is_image = HfResolver::is_image_path(&path);
+                        let config = HfResolverConfig::new(dataset_name, cache_dir);
+                        let resolver = HfResolver::new(config);
+
+                        match resolver.resolve(&path, is_image)? {
+                            Some(bytes) => bytes,
+                            None => {
+                                // Skip this segment if resolver returns None (skip_missing mode)
+                                println!("    Skipping missing file: {}", path);
+                                continue;
+                            }
+                        }
                     }
                 }
                 SegmentContent::Url(url) => {
-                    // Placeholder for URLs that haven't been downloaded
-                    format!("[URL: {}]", url).into_bytes()
+                    // Try to resolve URL via HfResolver if it's an HF URL
+                    if url.starts_with("hf://") || url.contains("huggingface.co") {
+                        let path = url
+                            .strip_prefix("hf://datasets/")
+                            .or_else(|| url.strip_prefix("hf://"))
+                            .unwrap_or(&url);
+                        let is_image = HfResolver::is_image_path(path);
+                        let config = HfResolverConfig::new(dataset_name, cache_dir);
+                        let resolver = HfResolver::new(config);
+
+                        match resolver.resolve(path, is_image)? {
+                            Some(bytes) => bytes,
+                            None => {
+                                println!("    Skipping missing URL: {}", url);
+                                continue;
+                            }
+                        }
+                    } else {
+                        // Non-HF URLs: use placeholder (could add reqwest download later)
+                        println!("    Warning: Non-HF URL not downloaded: {}", url);
+                        if HfResolver::is_image_path(&url) {
+                            vec![0u8; ZERO_IMAGE_SIZE]
+                        } else {
+                            format!("[URL: {}]", url).into_bytes()
+                        }
+                    }
                 }
             };
 

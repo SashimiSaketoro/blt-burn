@@ -1,18 +1,19 @@
 //! Fused CubeCL operations for BLT.
 //!
 //! This module provides custom CubeCL kernels that fuse multiple operations
-//! into single GPU kernels, providing 2-5x speedup over separate operations.
+//! into single GPU kernels, reducing kernel launch overhead and memory traffic
+//! compared to calling separate operations.
 //!
 //! # Available Fused Operations
 //!
-//! | Operation | Description | Speedup |
-//! |-----------|-------------|---------|
-//! | `fused_entropy` | Entropy calculation (softmax + log + sum) | 3-5x |
-//! | `fused_rms_norm` | RMS Normalization with scale | 3-5x |
-//! | `fused_softmax` | Softmax over last dimension | 3-5x |
-//! | `fused_l2_norm` | L2 norm of embeddings | 2-3x |
-//! | `fused_silu_gate` | SiLU activation with gating (SwiGLU FFN) | 2x |
-//! | `fused_coherence` | Coherence score computation | 2x |
+//! | Operation | Description |
+//! |-----------|-------------|
+//! | `fused_entropy` | Entropy calculation (softmax + log + sum) |
+//! | `fused_rms_norm` | RMS normalization with scale |
+//! | `fused_softmax` | Softmax over last dimension |
+//! | `fused_l2_norm` | L2 norm of embeddings |
+//! | `fused_silu_gate` | SiLU activation with gating (SwiGLU FFN) |
+//! | `fused_coherence` | Coherence score computation |
 //!
 //! # Architecture
 //!
