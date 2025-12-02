@@ -80,7 +80,7 @@ impl ModalityPreTokenizer for CodePreTokenizer {
         let lang = self.get_language()?;
         parser
             .set_language(&lang)
-            .map_err(|e| anyhow::anyhow!("Failed to set language: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to set language: {e}"))?;
 
         // Parse the source code
         let tree = parser
@@ -170,7 +170,7 @@ impl ModalityPreTokenizer for CodePreTokenizer {
         Ok(segments)
     }
 
-    fn modality(&self) -> &str {
+    fn modality(&self) -> &'static str {
         "code_ast"
     }
 }
@@ -208,4 +208,3 @@ mod tests {
         assert!(result.is_err());
     }
 }
-

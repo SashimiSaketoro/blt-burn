@@ -23,7 +23,7 @@ pub struct PrefetchedDoc {
 }
 
 /// Background document prefetcher using bounded channel
-/// 
+///
 /// # Architecture
 /// ```text
 /// [Dataset Iterator] --spawn--> [Background Thread]
@@ -32,7 +32,7 @@ pub struct PrefetchedDoc {
 ///                                      |
 ///                               [Main Thread: GPU Processing]
 /// ```
-/// 
+///
 /// The bounded channel provides natural backpressure:
 /// - If GPU is slow, prefetcher blocks waiting for channel space
 /// - If prefetch is slow, GPU processes all buffered docs then waits
@@ -45,16 +45,16 @@ pub struct DocumentPrefetcher {
 
 impl DocumentPrefetcher {
     /// Create a new prefetcher with specified buffer size
-    /// 
+    ///
     /// # Arguments
     /// * `iter` - Iterator yielding (id, bytes) pairs
     /// * `buffer_size` - Number of documents to buffer ahead (default: 4)
-    /// 
+    ///
     /// # Example
     /// ```rust,ignore
     /// let docs = dataset.iter().map(|item| (item.id, item.text.into_bytes()));
     /// let prefetcher = DocumentPrefetcher::new(docs, 4);
-    /// 
+    ///
     /// while let Some(doc) = prefetcher.next() {
     ///     // GPU processes doc.bytes while next doc loads in background
     ///     let result = process_data(&doc.bytes, &model, &device, threshold)?;
@@ -66,11 +66,11 @@ impl DocumentPrefetcher {
     {
         // Bounded channel provides backpressure
         let (tx, rx) = sync_channel::<Option<PrefetchedDoc>>(buffer_size);
-        
+
         let handle = thread::spawn(move || {
             Self::prefetch_worker(iter, tx);
         });
-        
+
         Self {
             receiver: rx,
             handle: Some(handle),
@@ -78,8 +78,10 @@ impl DocumentPrefetcher {
             docs_prefetched: 0,
         }
     }
-    
-    /// Worker function running in background thread
+
+    /// Worker function running in background thread.
+    /// Takes ownership of `tx` as it's moved into the spawned thread.
+    #[allow(clippy::needless_pass_by_value)] // Thread worker needs owned SyncSender
     fn prefetch_worker<I>(iter: I, tx: SyncSender<Option<PrefetchedDoc>>)
     where
         I: Iterator<Item = (String, Vec<u8>)>,
@@ -91,38 +93,37 @@ impl DocumentPrefetcher {
                 bytes,
                 original_len,
             };
-            
+
             // send() blocks if channel is full (backpressure)
             if tx.send(Some(doc)).is_err() {
                 // Receiver dropped, stop prefetching
                 break;
             }
         }
-        
+
         // Signal completion
         let _ = tx.send(None);
     }
-    
+
     /// Get next prefetched document
-    /// 
+    ///
     /// Returns `None` when all documents have been processed.
     /// Blocks if no document is ready yet.
-    pub fn next(&mut self) -> Option<PrefetchedDoc> {
+    pub fn recv(&mut self) -> Option<PrefetchedDoc> {
         match self.receiver.recv() {
             Ok(Some(doc)) => {
                 self.docs_prefetched += 1;
                 Some(doc)
             }
-            Ok(None) => None,  // Iterator exhausted
-            Err(_) => None,    // Channel closed
+            Ok(None) | Err(_) => None, // Iterator exhausted or channel closed
         }
     }
-    
+
     /// Get the configured buffer size
     pub fn buffer_size(&self) -> usize {
         self.buffer_size
     }
-    
+
     /// Get count of documents prefetched so far
     pub fn docs_prefetched(&self) -> usize {
         self.docs_prefetched
@@ -141,16 +142,16 @@ impl Drop for DocumentPrefetcher {
 /// Iterator adapter for DocumentPrefetcher
 impl Iterator for DocumentPrefetcher {
     type Item = PrefetchedDoc;
-    
+
     fn next(&mut self) -> Option<Self::Item> {
-        DocumentPrefetcher::next(self)
+        self.recv()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_prefetcher_basic() {
         let docs = vec![
@@ -158,40 +159,40 @@ mod tests {
             ("doc2".to_string(), b"world".to_vec()),
             ("doc3".to_string(), b"test".to_vec()),
         ];
-        
+
         let mut prefetcher = DocumentPrefetcher::new(docs.into_iter(), 2);
-        
+
         let d1 = prefetcher.next().unwrap();
         assert_eq!(d1.id, "doc1");
         assert_eq!(d1.bytes, b"hello");
-        
+
         let d2 = prefetcher.next().unwrap();
         assert_eq!(d2.id, "doc2");
-        
+
         let d3 = prefetcher.next().unwrap();
         assert_eq!(d3.id, "doc3");
-        
+
         assert!(prefetcher.next().is_none());
         assert_eq!(prefetcher.docs_prefetched(), 3);
     }
-    
+
     #[test]
     fn test_prefetcher_empty() {
         let docs: Vec<(String, Vec<u8>)> = vec![];
         let mut prefetcher = DocumentPrefetcher::new(docs.into_iter(), 4);
         assert!(prefetcher.next().is_none());
     }
-    
+
     #[test]
     fn test_prefetcher_as_iterator() {
         let docs = vec![
             ("a".to_string(), vec![1, 2, 3]),
             ("b".to_string(), vec![4, 5, 6]),
         ];
-        
+
         let prefetcher = DocumentPrefetcher::new(docs.into_iter(), 2);
         let collected: Vec<_> = prefetcher.collect();
-        
+
         assert_eq!(collected.len(), 2);
         assert_eq!(collected[0].id, "a");
         assert_eq!(collected[1].id, "b");

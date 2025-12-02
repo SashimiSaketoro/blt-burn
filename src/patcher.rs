@@ -62,6 +62,21 @@ pub fn entropy<B: Backend>(scores: Tensor<B, 3>) -> Tensor<B, 2> {
     entropy_values
 }
 
+/// Compute patch start mask from entropy values with monotonicity detection.
+///
+/// Following the official BLT patcher, this function:
+/// 1. Always marks positions 0 AND 1 as patch starts (first two bytes are separate patches)
+/// 2. From position 2 onward, uses entropy delta threshold detection
+///
+/// This matches `find_entropy_patch_start_ids` in the official BLT repo which always
+/// starts with `first_ids = torch.tensor([0, 1], ...)`.
+///
+/// # Arguments
+/// * `entropies` - Entropy values `[batch, seq_len]`
+/// * `threshold` - Delta threshold for detecting entropy spikes
+///
+/// # Returns
+/// Boolean mask `[batch, seq_len]` where 1 = patch start
 pub fn patch_start_mask_from_entropy_with_monotonicity<B: Backend>(
     entropies: Tensor<B, 2>,
     threshold: f64,
@@ -72,22 +87,40 @@ pub fn patch_start_mask_from_entropy_with_monotonicity<B: Backend>(
         return entropies.greater_elem(threshold).int();
     }
 
-    // Create mask with first element True (1)
-    // We can't easily mutate tensors in Burn, so we build it.
+    if seq_len == 1 {
+        // Only one byte - it's a patch start
+        return Tensor::ones([bs, 1], &entropies.device());
+    }
 
-    // differences = entropies[:, 1:] - entropies[:, :-1]
-    let current = entropies.clone().slice([0..bs, 1..seq_len]);
-    let prev = entropies.clone().slice([0..bs, 0..seq_len - 1]);
+    if seq_len == 2 {
+        // Two bytes - both are patch starts (official BLT behavior)
+        return Tensor::ones([bs, 2], &entropies.device());
+    }
+
+    // Official BLT: first_ids = [0, 1], then entropy detection from position 2+
+    // We mark positions 0 and 1 as True, then apply entropy detection to positions 2+
+
+    // differences = entropies[:, 2:] - entropies[:, 1:-1]
+    // (compare position i with position i-1, starting from position 2)
+    let current = entropies.clone().slice([0..bs, 2..seq_len]);
+    let prev = entropies.clone().slice([0..bs, 1..seq_len - 1]);
     let differences = current - prev;
 
-    // condition = differences > t
+    // condition = differences > threshold
     let condition = differences.greater_elem(threshold).int();
 
-    // Construct full mask: [1, condition...]
-    let start_mask = Tensor::ones([bs, 1], &entropies.device());
-    Tensor::cat(vec![start_mask, condition], 1)
+    // Construct full mask: [1, 1, condition...]
+    // Position 0 = True (start of sequence)
+    // Position 1 = True (official BLT always separates first two bytes)
+    // Position 2+ = entropy-based detection
+    let first_two = Tensor::ones([bs, 2], &entropies.device());
+    Tensor::cat(vec![first_two, condition], 1)
 }
 
+/// Extract patch start indices from a mask tensor on CPU.
+///
+/// # Panics
+/// Panics if the integer tensor cannot be converted to i32 slice (backend mismatch).
 pub fn patch_start_indices_cpu<B: Backend>(patch_start_mask: Tensor<B, 2, Int>) -> Vec<Vec<usize>> {
     let [bs, seq_len] = patch_start_mask.dims();
     let mask_data = patch_start_mask.into_data();

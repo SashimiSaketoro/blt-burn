@@ -1,3 +1,7 @@
+// Clippy pedantic allows for binary
+#![allow(clippy::cast_possible_truncation)]
+#![allow(clippy::cast_precision_loss)]
+
 use blt_burn::{
     model::LMTransformerConfig,
     patcher::{patch_start_indices_cpu, patch_start_mask_from_entropy_with_monotonicity},
@@ -51,7 +55,10 @@ fn main() {
     // Determine model path and format
     // Priority: CLI arg > safetensors env var > mpk env var > default
     let (model_path, use_safetensors) = if let Some(path) = args.model_path {
-        let is_safetensors = path.extension().map(|e| e == "safetensors").unwrap_or(false);
+        let is_safetensors = path
+            .extension()
+            .map(|e| e == "safetensors")
+            .unwrap_or(false);
         (path, is_safetensors && !args.use_mpk)
     } else if let Some(path) = option_env!("BLT_MODEL_SAFETENSORS_PATH") {
         (PathBuf::from(path), true)
@@ -62,7 +69,7 @@ fn main() {
         let home = std::env::var("HOME").unwrap_or_default();
         let hf_path = PathBuf::from(&home)
             .join(".cache/huggingface/hub/models--facebook--blt-entropy/snapshots");
-        
+
         let mut found_path: Option<PathBuf> = None;
         if hf_path.exists() {
             if let Ok(entries) = std::fs::read_dir(&hf_path) {
@@ -76,7 +83,7 @@ fn main() {
                 }
             }
         }
-        
+
         if let Some(path) = found_path {
             (path, true)
         } else {
@@ -101,7 +108,7 @@ fn main() {
     // Initialize Tokenizer
     let tokenizer = BltTokenizer::new(true, true);
     let tokens = tokenizer.encode(&text);
-    println!("Tokens: {:?}", tokens.len());
+    println!("Tokens: {}", tokens.len());
 
     // Initialize Model
     let config = LMTransformerConfig {
@@ -121,8 +128,16 @@ fn main() {
     let model = config.init::<Backend>(&device);
 
     // Load weights from safetensors or mpk file
-    println!("Loading weights from {:?} (format: {})", model_path, if use_safetensors { "safetensors" } else { "mpk" });
-    
+    println!(
+        "Loading weights from {} (format: {})",
+        model_path.display(),
+        if use_safetensors {
+            "safetensors"
+        } else {
+            "mpk"
+        }
+    );
+
     let model = if use_safetensors {
         let recorder = SafetensorsFileRecorder::<FullPrecisionSettings>::default();
         model.load_record(
@@ -134,7 +149,7 @@ fn main() {
         let recorder = NamedMpkFileRecorder::<FullPrecisionSettings>::default();
         model.load_record(
             recorder
-                .load(model_path.clone().into(), &device)
+                .load(model_path.clone(), &device)
                 .expect("Failed to load mpk weights"),
         )
     };
@@ -154,8 +169,7 @@ fn main() {
     let total_tokens = tokens_vec.len();
 
     println!(
-        "Processing {} tokens with overlapping windows (chunk_size={}, stride={})...",
-        total_tokens, chunk_size, stride
+        "Processing {total_tokens} tokens with overlapping windows (chunk_size={chunk_size}, stride={stride})..."
     );
 
     let mut position = 0;
@@ -164,8 +178,7 @@ fn main() {
         if chunk_idx % 5 == 0 {
             let progress = (position as f32 / total_tokens as f32 * 100.0) as u32;
             println!(
-                "Processing position {}/{} ({}%)",
-                position, total_tokens, progress
+                "Processing position {position}/{total_tokens} ({progress}%)"
             );
         }
 
@@ -252,9 +265,9 @@ fn main() {
     // Safetensors doesn't support U64/usize, using I32
     let patch_indices_i32: Vec<i32> = patch_indices[0].iter().map(|&x| x as i32).collect();
 
-    println!("Exporting to {:?}...", args.output);
+    println!("Exporting to {}...", args.output.display());
     println!("  Embeddings: [{}, {}]", total_tokens, 768);
-    println!("  Norms: [{}]", total_tokens);
+    println!("  Norms: [{total_tokens}]");
     println!("  Patches: {}", patch_indices[0].len());
 
     // SAFETENSORS EXPORT

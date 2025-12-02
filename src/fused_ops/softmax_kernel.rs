@@ -56,7 +56,7 @@ pub fn fused_softmax_kernel<F: Float>(
     for i in 0..softmax_dim_size {
         let exp_val = F::exp(input[row_start + i] - max_val);
         output[row_start + i] = exp_val; // Store exp values temporarily
-        exp_sum = exp_sum + exp_val;
+        exp_sum += exp_val;
     }
 
     // ========== Pass 3: Normalize by sum ==========
@@ -105,7 +105,7 @@ pub fn fused_softmax_attention_kernel<F: Float>(
     for i in 0..seq_k {
         let exp_val = F::exp(input[row_start + i] - max_val);
         output[row_start + i] = exp_val;
-        exp_sum = exp_sum + exp_val;
+        exp_sum += exp_val;
     }
 
     // ========== Pass 3: Normalize ==========
@@ -114,4 +114,3 @@ pub fn fused_softmax_attention_kernel<F: Float>(
         output[row_start + i] = output[row_start + i] * inv_sum;
     }
 }
-

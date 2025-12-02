@@ -17,7 +17,11 @@ type TestBackend = Wgpu;
 // ============================================================================
 
 /// Reference RMS norm implementation
-fn rms_norm_reference<B: Backend>(x: Tensor<B, 3>, weight: Tensor<B, 1>, epsilon: f32) -> Tensor<B, 3> {
+fn rms_norm_reference<B: Backend>(
+    x: Tensor<B, 3>,
+    weight: Tensor<B, 1>,
+    epsilon: f32,
+) -> Tensor<B, 3> {
     let [_, _, dim] = x.dims();
     let squared = x.clone() * x.clone();
     let norm = squared.mean_dim(2).sqrt().add_scalar(epsilon as f64);
@@ -48,8 +52,7 @@ fn test_fused_rms_norm_matches_reference() {
 
     assert!(
         max_diff < 1e-3,
-        "RMS norm max diff {} exceeds tolerance",
-        max_diff
+        "RMS norm max diff {max_diff} exceeds tolerance"
     );
 }
 
@@ -86,8 +89,7 @@ fn test_fused_l2_norm_matches_reference() {
 
     assert!(
         max_diff < 1e-4,
-        "L2 norm max diff {} exceeds tolerance",
-        max_diff
+        "L2 norm max diff {max_diff} exceeds tolerance"
     );
 }
 
@@ -104,7 +106,8 @@ fn silu_gate_reference<B: Backend>(gate: Tensor<B, 3>, up: Tensor<B, 3>) -> Tens
 fn test_fused_silu_gate_matches_reference() {
     let device = WgpuDevice::default();
 
-    let gate = Tensor::<TestBackend, 3>::random([2, 8, 256], Distribution::Normal(0.0, 1.0), &device);
+    let gate =
+        Tensor::<TestBackend, 3>::random([2, 8, 256], Distribution::Normal(0.0, 1.0), &device);
     let up = Tensor::<TestBackend, 3>::random([2, 8, 256], Distribution::Normal(0.0, 1.0), &device);
 
     let reference = silu_gate_reference(gate.clone(), up.clone());
@@ -123,8 +126,7 @@ fn test_fused_silu_gate_matches_reference() {
 
     assert!(
         max_diff < 1e-4,
-        "SiLU gate max diff {} exceeds tolerance",
-        max_diff
+        "SiLU gate max diff {max_diff} exceeds tolerance"
     );
 }
 
@@ -133,7 +135,11 @@ fn test_fused_silu_gate_matches_reference() {
 // ============================================================================
 
 /// Reference coherence implementation
-fn coherence_reference<B: Backend>(norms: Tensor<B, 2>, entropies: Tensor<B, 2>, epsilon: f32) -> Tensor<B, 2> {
+fn coherence_reference<B: Backend>(
+    norms: Tensor<B, 2>,
+    entropies: Tensor<B, 2>,
+    epsilon: f32,
+) -> Tensor<B, 2> {
     norms.clone().powf_scalar(2.0) / (entropies + epsilon as f64)
 }
 
@@ -141,8 +147,10 @@ fn coherence_reference<B: Backend>(norms: Tensor<B, 2>, entropies: Tensor<B, 2>,
 fn test_fused_coherence_matches_reference() {
     let device = WgpuDevice::default();
 
-    let norms = Tensor::<TestBackend, 2>::random([4, 32], Distribution::Uniform(0.1, 10.0), &device);
-    let entropies = Tensor::<TestBackend, 2>::random([4, 32], Distribution::Uniform(0.1, 5.0), &device);
+    let norms =
+        Tensor::<TestBackend, 2>::random([4, 32], Distribution::Uniform(0.1, 10.0), &device);
+    let entropies =
+        Tensor::<TestBackend, 2>::random([4, 32], Distribution::Uniform(0.1, 5.0), &device);
 
     let reference = coherence_reference(norms.clone(), entropies.clone(), 1e-6);
     let fused = blt_burn::fused_ops::fused_coherence(norms, entropies, 1e-6);
@@ -160,8 +168,7 @@ fn test_fused_coherence_matches_reference() {
 
     assert!(
         max_diff < 1e-4,
-        "Coherence max diff {} exceeds tolerance",
-        max_diff
+        "Coherence max diff {max_diff} exceeds tolerance"
     );
 }
 
@@ -196,8 +203,7 @@ fn test_fused_softmax_3d() {
 
     assert!(
         max_diff < 1e-4,
-        "Softmax 3D max diff {} exceeds tolerance",
-        max_diff
+        "Softmax 3D max diff {max_diff} exceeds tolerance"
     );
 }
 
@@ -206,7 +212,8 @@ fn test_fused_softmax_attention_dims() {
     let device = WgpuDevice::default();
 
     // Attention scores: [batch, heads, seq_q, seq_k]
-    let x = Tensor::<TestBackend, 4>::random([2, 8, 32, 32], Distribution::Normal(0.0, 1.0), &device);
+    let x =
+        Tensor::<TestBackend, 4>::random([2, 8, 32, 32], Distribution::Normal(0.0, 1.0), &device);
 
     let reference = softmax_reference(x.clone(), 3);
     let fused = blt_burn::fused_ops::fused_softmax(x, 32);
@@ -224,8 +231,7 @@ fn test_fused_softmax_attention_dims() {
 
     assert!(
         max_diff < 1e-4,
-        "Softmax attention max diff {} exceeds tolerance",
-        max_diff
+        "Softmax attention max diff {max_diff} exceeds tolerance"
     );
 }
 
@@ -246,13 +252,17 @@ fn test_fused_ops_batch_size_one() {
     let _ = blt_burn::fused_ops::fused_softmax(x.clone(), 64);
 
     // SiLU gate
-    let gate = Tensor::<TestBackend, 3>::random([1, 16, 128], Distribution::Normal(0.0, 1.0), &device);
-    let up = Tensor::<TestBackend, 3>::random([1, 16, 128], Distribution::Normal(0.0, 1.0), &device);
+    let gate =
+        Tensor::<TestBackend, 3>::random([1, 16, 128], Distribution::Normal(0.0, 1.0), &device);
+    let up =
+        Tensor::<TestBackend, 3>::random([1, 16, 128], Distribution::Normal(0.0, 1.0), &device);
     let _ = blt_burn::fused_ops::fused_silu_gate(gate, up);
 
     // Coherence
-    let norms = Tensor::<TestBackend, 2>::random([1, 16], Distribution::Uniform(0.1, 10.0), &device);
-    let entropies = Tensor::<TestBackend, 2>::random([1, 16], Distribution::Uniform(0.1, 5.0), &device);
+    let norms =
+        Tensor::<TestBackend, 2>::random([1, 16], Distribution::Uniform(0.1, 10.0), &device);
+    let entropies =
+        Tensor::<TestBackend, 2>::random([1, 16], Distribution::Uniform(0.1, 5.0), &device);
     let _ = blt_burn::fused_ops::fused_coherence(norms, entropies, 1e-6);
 }
 
@@ -269,7 +279,9 @@ fn test_fused_ops_numerical_stability() {
 
     for val in softmax_values.iter() {
         assert!(val.is_finite(), "Softmax produced non-finite value");
-        assert!(*val >= 0.0 && *val <= 1.0, "Softmax value {} out of [0,1] range", val);
+        assert!(
+            *val >= 0.0 && *val <= 1.0,
+            "Softmax value {val} out of [0,1] range"
+        );
     }
 }
-

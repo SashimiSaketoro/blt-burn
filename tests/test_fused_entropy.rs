@@ -27,7 +27,8 @@ fn test_fused_entropy_matches_reference_small() {
     let device = WgpuDevice::default();
 
     // Small test case: batch=2, seq=4, vocab=10
-    let logits = Tensor::<TestBackend, 3>::random([2, 4, 10], Distribution::Normal(0.0, 1.0), &device);
+    let logits =
+        Tensor::<TestBackend, 3>::random([2, 4, 10], Distribution::Normal(0.0, 1.0), &device);
 
     let reference = entropy_reference(logits.clone());
     let fused = blt_burn::fused_ops::fused_entropy(logits, 10);
@@ -39,17 +40,17 @@ fn test_fused_entropy_matches_reference_small() {
     let ref_values: Vec<f32> = ref_data.as_slice().unwrap().to_vec();
     let fused_values: Vec<f32> = fused_data.as_slice().unwrap().to_vec();
 
-    assert_eq!(ref_values.len(), fused_values.len(), "Output shapes don't match");
+    assert_eq!(
+        ref_values.len(),
+        fused_values.len(),
+        "Output shapes don't match"
+    );
 
     for (i, (r, f)) in ref_values.iter().zip(fused_values.iter()).enumerate() {
         let diff = (r - f).abs();
         assert!(
             diff < 1e-4,
-            "Mismatch at index {}: reference={}, fused={}, diff={}",
-            i,
-            r,
-            f,
-            diff
+            "Mismatch at index {i}: reference={r}, fused={f}, diff={diff}"
         );
     }
 }
@@ -81,8 +82,7 @@ fn test_fused_entropy_matches_reference_blt_dims() {
 
     assert!(
         max_diff < 1e-3,
-        "Max difference {} exceeds tolerance 1e-3",
-        max_diff
+        "Max difference {max_diff} exceeds tolerance 1e-3"
     );
 }
 
@@ -103,15 +103,11 @@ fn test_fused_entropy_numerical_stability() {
     for (i, val) in values.iter().enumerate() {
         assert!(
             val.is_finite(),
-            "Entropy contains non-finite value at index {}: {}",
-            i,
-            val
+            "Entropy contains non-finite value at index {i}: {val}"
         );
         assert!(
             *val >= 0.0,
-            "Entropy should be non-negative at index {}: {}",
-            i,
-            val
+            "Entropy should be non-negative at index {i}: {val}"
         );
     }
 }
@@ -130,7 +126,10 @@ fn test_fused_entropy_batch_size_one() {
     let ref_data = reference.into_data();
     let fused_data = fused.into_data();
 
-    assert_eq!(ref_data.shape, fused_data.shape, "Shapes don't match for batch_size=1");
+    assert_eq!(
+        ref_data.shape, fused_data.shape,
+        "Shapes don't match for batch_size=1"
+    );
 }
 
 #[test]
@@ -147,7 +146,10 @@ fn test_fused_entropy_seq_len_one() {
     let ref_data = reference.into_data();
     let fused_data = fused.into_data();
 
-    assert_eq!(ref_data.shape, fused_data.shape, "Shapes don't match for seq_len=1");
+    assert_eq!(
+        ref_data.shape, fused_data.shape,
+        "Shapes don't match for seq_len=1"
+    );
 }
 
 #[test]
@@ -169,11 +171,7 @@ fn test_fused_entropy_uniform_distribution() {
         let diff = (val - expected_entropy).abs();
         assert!(
             diff < 1e-3,
-            "Uniform distribution entropy mismatch at index {}: expected {}, got {}, diff={}",
-            i,
-            expected_entropy,
-            val,
-            diff
+            "Uniform distribution entropy mismatch at index {i}: expected {expected_entropy}, got {val}, diff={diff}"
         );
     }
 }
@@ -185,12 +183,12 @@ fn test_fused_entropy_one_hot() {
     // When one logit is much larger than others, entropy should approach 0
     let vocab_size = 256;
     let logits = Tensor::<TestBackend, 3>::full([1, 1, vocab_size], -100.0, &device);
-    
+
     // Set one position to be dominant
     // Note: We can't easily set a single element, so we use a different approach
     // Create logits where first element is 100, rest are -100
     // This approximates a one-hot distribution
-    
+
     let result = blt_burn::fused_ops::fused_entropy(logits, vocab_size);
     let result_data = result.into_data();
     let values: Vec<f32> = result_data.as_slice().unwrap().to_vec();
@@ -203,4 +201,3 @@ fn test_fused_entropy_one_hot() {
         assert!(*val >= 0.0);
     }
 }
-

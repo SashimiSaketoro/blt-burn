@@ -109,7 +109,7 @@ impl PdfPreTokenizer {
                 let text_bytes = text.into_bytes();
                 Some(ByteSegment {
                     bytes: text_bytes.clone(),
-                    label: Some(format!("pdf_page_{}_text", page_num)),
+                    label: Some(format!("pdf_page_{page_num}_text")),
                     metadata: Some(SegmentMetadata {
                         start_offset: 0,
                         end_offset: text_bytes.len(),
@@ -126,8 +126,7 @@ impl PdfPreTokenizer {
             }
             Err(e) => {
                 eprintln!(
-                    "Warning: Failed to extract text from PDF page {}: {}",
-                    page_num, e
+                    "Warning: Failed to extract text from PDF page {page_num}: {e}"
                 );
                 None
             }
@@ -152,7 +151,7 @@ impl PdfPreTokenizer {
 
                 Some(ByteSegment {
                     bytes: raw_bytes,
-                    label: Some(format!("pdf_page_{}_image", page_num)),
+                    label: Some(format!("pdf_page_{page_num}_image")),
                     metadata: Some(SegmentMetadata {
                         start_offset: 0,
                         end_offset: 0, // Images don't have byte offsets in source
@@ -173,10 +172,7 @@ impl PdfPreTokenizer {
                 })
             }
             Err(e) => {
-                eprintln!(
-                    "Warning: Failed to render PDF page {}: {}",
-                    page_num, e
-                );
+                eprintln!("Warning: Failed to render PDF page {page_num}: {e}");
                 None
             }
         }
@@ -227,7 +223,7 @@ impl ModalityPreTokenizer for PdfPreTokenizer {
         Ok(segments)
     }
 
-    fn modality(&self) -> &str {
+    fn modality(&self) -> &'static str {
         "pdf"
     }
 
@@ -235,10 +231,7 @@ impl ModalityPreTokenizer for PdfPreTokenizer {
         true
     }
 
-    fn pre_tokenize_multiview(
-        &self,
-        data: &[u8],
-    ) -> Result<HashMap<String, Vec<ByteSegment>>> {
+    fn pre_tokenize_multiview(&self, data: &[u8]) -> Result<HashMap<String, Vec<ByteSegment>>> {
         let pdfium = Self::init_pdfium()?;
         let doc = pdfium
             .load_pdf_from_byte_slice(data, None)
@@ -307,4 +300,3 @@ mod tests {
         assert_eq!(pretok.modality(), "pdf");
     }
 }
-

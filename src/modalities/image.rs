@@ -62,7 +62,7 @@ impl ModalityPreTokenizer for ImagePreTokenizer {
     fn pre_tokenize(&self, data: &[u8]) -> Result<Vec<ByteSegment>> {
         // Decode image from bytes (supports PNG, JPEG, GIF, etc.)
         let img = image::load_from_memory(data)
-            .map_err(|e| anyhow::anyhow!("Failed to decode image: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to decode image: {e}"))?;
 
         // Convert to RGB8 for consistent processing
         let rgb = img.to_rgb8();
@@ -136,7 +136,7 @@ impl ModalityPreTokenizer for ImagePreTokenizer {
             let this_entropy = this_meta["local_entropy"].as_f64().unwrap_or(0.0) as f32;
 
             // Merge threshold: low entropy implies uniform region
-            if (last_entropy + this_entropy) / 2.0 < ENTROPY_MERGE_THRESHOLD {
+            if f32::midpoint(last_entropy, this_entropy) < ENTROPY_MERGE_THRESHOLD {
                 let last_seg = merged.last_mut().unwrap();
                 last_seg.bytes.extend(&patch.bytes);
 
@@ -147,15 +147,9 @@ impl ModalityPreTokenizer for ImagePreTokenizer {
                     // Update extra to indicate this is a merged super-patch
                     if let Some(extra) = &mut meta.extra {
                         if let Some(obj) = extra.as_object_mut() {
-                            let merge_count = obj
-                                .get("merge_count")
-                                .and_then(|v| v.as_u64())
-                                .unwrap_or(1)
-                                + 1;
-                            obj.insert(
-                                "merge_count".to_string(),
-                                serde_json::json!(merge_count),
-                            );
+                            let merge_count =
+                                obj.get("merge_count").and_then(|v| v.as_u64()).unwrap_or(1) + 1;
+                            obj.insert("merge_count".to_string(), serde_json::json!(merge_count));
                             obj.insert("is_super_patch".to_string(), serde_json::json!(true));
                         }
                     }
@@ -168,7 +162,7 @@ impl ModalityPreTokenizer for ImagePreTokenizer {
         Ok(merged)
     }
 
-    fn modality(&self) -> &str {
+    fn modality(&self) -> &'static str {
         "image"
     }
 }
@@ -190,4 +184,3 @@ mod tests {
         assert!(entropy > 7.0, "Varied data should have high entropy");
     }
 }
-

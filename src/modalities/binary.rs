@@ -39,10 +39,7 @@ impl BinaryPreTokenizer {
             }
 
             // Get section name from string table
-            let name = elf
-                .shdr_strtab
-                .get_at(section.sh_name)
-                .unwrap_or("unknown");
+            let name = elf.shdr_strtab.get_at(section.sh_name).unwrap_or("unknown");
 
             // Classify section type
             let section_type = match section.sh_type {
@@ -67,7 +64,7 @@ impl BinaryPreTokenizer {
 
             segments.push(ByteSegment {
                 bytes: data[start..end].to_vec(),
-                label: Some(format!("elf_section_{}", name)),
+                label: Some(format!("elf_section_{name}")),
                 metadata: Some(SegmentMetadata {
                     start_offset: start,
                     end_offset: end,
@@ -119,16 +116,16 @@ impl BinaryPreTokenizer {
 
             // Parse characteristics flags
             let characteristics = section.characteristics;
-            let is_executable = characteristics & 0x20000000 != 0; // IMAGE_SCN_MEM_EXECUTE
-            let is_readable = characteristics & 0x40000000 != 0; // IMAGE_SCN_MEM_READ
-            let is_writable = characteristics & 0x80000000 != 0; // IMAGE_SCN_MEM_WRITE
-            let is_code = characteristics & 0x00000020 != 0; // IMAGE_SCN_CNT_CODE
-            let is_initialized_data = characteristics & 0x00000040 != 0; // IMAGE_SCN_CNT_INITIALIZED_DATA
-            let is_uninitialized_data = characteristics & 0x00000080 != 0; // IMAGE_SCN_CNT_UNINITIALIZED_DATA
+            let is_executable = characteristics & 0x2000_0000 != 0; // IMAGE_SCN_MEM_EXECUTE
+            let is_readable = characteristics & 0x4000_0000 != 0; // IMAGE_SCN_MEM_READ
+            let is_writable = characteristics & 0x8000_0000 != 0; // IMAGE_SCN_MEM_WRITE
+            let is_code = characteristics & 0x0000_0020 != 0; // IMAGE_SCN_CNT_CODE
+            let is_initialized_data = characteristics & 0x0000_0040 != 0; // IMAGE_SCN_CNT_INITIALIZED_DATA
+            let is_uninitialized_data = characteristics & 0x0000_0080 != 0; // IMAGE_SCN_CNT_UNINITIALIZED_DATA
 
             segments.push(ByteSegment {
                 bytes: data[start..end].to_vec(),
-                label: Some(format!("pe_section_{}", name)),
+                label: Some(format!("pe_section_{name}")),
                 metadata: Some(SegmentMetadata {
                     start_offset: start,
                     end_offset: end,
@@ -209,10 +206,7 @@ impl BinaryPreTokenizer {
     }
 
     /// Extract sections from a single (non-fat) Mach-O binary.
-    fn extract_single_macho(
-        data: &[u8],
-        macho: &goblin::mach::MachO,
-    ) -> Result<Vec<ByteSegment>> {
+    fn extract_single_macho(data: &[u8], macho: &goblin::mach::MachO) -> Result<Vec<ByteSegment>> {
         let mut segments_out = Vec::new();
 
         for segment in &macho.segments {
@@ -238,7 +232,7 @@ impl BinaryPreTokenizer {
 
                 segments_out.push(ByteSegment {
                     bytes: section_data.to_vec(),
-                    label: Some(format!("macho_section_{}_{}", seg_name, sect_name)),
+                    label: Some(format!("macho_section_{seg_name}_{sect_name}")),
                     metadata: Some(SegmentMetadata {
                         start_offset: start,
                         end_offset: end,
@@ -285,21 +279,19 @@ impl ModalityPreTokenizer for BinaryPreTokenizer {
             Ok(Object::Elf(elf)) => Self::extract_elf_sections(data, &elf),
             Ok(Object::PE(pe)) => Self::extract_pe_sections(data, &pe),
             Ok(Object::Mach(mach)) => Self::extract_macho_sections(data, &mach),
-            Ok(Object::Archive(_)) => {
-                Ok(vec![ByteSegment {
-                    bytes: data.to_vec(),
-                    label: Some("archive".to_string()),
-                    metadata: Some(SegmentMetadata {
-                        start_offset: 0,
-                        end_offset: data.len(),
-                        confidence: 0.5,
-                        extra: Some(serde_json::json!({
-                            "format": "Archive",
-                            "status": "archive_extraction_not_implemented"
-                        })),
-                    }),
-                }])
-            }
+            Ok(Object::Archive(_)) => Ok(vec![ByteSegment {
+                bytes: data.to_vec(),
+                label: Some("archive".to_string()),
+                metadata: Some(SegmentMetadata {
+                    start_offset: 0,
+                    end_offset: data.len(),
+                    confidence: 0.5,
+                    extra: Some(serde_json::json!({
+                        "format": "Archive",
+                        "status": "archive_extraction_not_implemented"
+                    })),
+                }),
+            }]),
             Ok(Object::Unknown(_)) | Ok(_) | Err(_) => {
                 // Unknown binary format - return as raw bytes
                 Ok(vec![ByteSegment {
@@ -319,7 +311,7 @@ impl ModalityPreTokenizer for BinaryPreTokenizer {
         }
     }
 
-    fn modality(&self) -> &str {
+    fn modality(&self) -> &'static str {
         "binary"
     }
 }
@@ -362,4 +354,3 @@ mod tests {
         let _ = pretok.pre_tokenize(&macho_header);
     }
 }
-

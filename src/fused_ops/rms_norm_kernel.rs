@@ -32,7 +32,7 @@ pub fn fused_rms_norm_kernel<F: Float>(
     let mut sum_sq = F::new(0.0);
     for i in 0..dim {
         let val = input[row_start + i];
-        sum_sq = sum_sq + val * val;
+        sum_sq += val * val;
     }
     let dim_float = F::cast_from(dim);
     let mean_sq = sum_sq / dim_float;
@@ -79,7 +79,7 @@ pub fn fused_rms_norm_kernel_optimized<F: Float>(
     let mut i = lane_idx;
     while i < dim {
         let val = input[row_start + i];
-        local_sum_sq = local_sum_sq + val * val;
+        local_sum_sq += val * val;
         i += plane_size;
     }
     let sum_sq = plane_sum(local_sum_sq);

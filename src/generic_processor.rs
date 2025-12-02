@@ -91,16 +91,16 @@ impl GenericDatasetProcessor {
                 if let Some(bytes) = extract_binary_value(df, row_idx, column)? {
                     let hash = hash_bytes(&bytes);
                     if seen_hashes.insert(hash.clone()) {
-                    segments.push(ModalitySegment {
-                        modality_type: ModalityType::Image,
-                        content: SegmentContent::Bytes(bytes),
-                        metadata: Some(json!({
-                            "column": column,
-                            "source": "generic_processor",
-                            "kind": "binary",
-                                "hash": hash,
-                        })),
-                    });
+                        segments.push(ModalitySegment {
+                            modality_type: ModalityType::Image,
+                            content: SegmentContent::Bytes(bytes),
+                            metadata: Some(json!({
+                                "column": column,
+                                "source": "generic_processor",
+                                "kind": "binary",
+                                    "hash": hash,
+                            })),
+                        });
                     }
                 }
             }
@@ -129,16 +129,16 @@ impl GenericDatasetProcessor {
                                 let bytes = serde_json::to_vec(&item)?;
                                 let hash = hash_bytes(&bytes);
                                 if seen_hashes.insert(hash.clone()) {
-                                segments.push(ModalitySegment {
-                                    modality_type: ModalityType::Image,
-                                    content: SegmentContent::Bytes(bytes),
-                                    metadata: Some(json!({
-                                        "column": column,
-                                        "index": idx,
-                                        "source": "generic_processor",
-                                            "hash": hash,
-                                    })),
-                                });
+                                    segments.push(ModalitySegment {
+                                        modality_type: ModalityType::Image,
+                                        content: SegmentContent::Bytes(bytes),
+                                        metadata: Some(json!({
+                                            "column": column,
+                                            "index": idx,
+                                            "source": "generic_processor",
+                                                "hash": hash,
+                                        })),
+                                    });
                                 }
                             }
                         }
@@ -172,21 +172,21 @@ impl GenericDatasetProcessor {
                                 }
                             }
                         } else {
-                    let content = if looks_like_url(&text) {
-                        SegmentContent::Url(text.clone())
-                    } else {
-                        SegmentContent::FilePath(text.clone())
-                    };
+                            let content = if looks_like_url(&text) {
+                                SegmentContent::Url(text.clone())
+                            } else {
+                                SegmentContent::FilePath(text.clone())
+                            };
 
-                    segments.push(ModalitySegment {
-                        modality_type: ModalityType::Image,
-                        content,
-                        metadata: Some(json!({
-                            "column": column,
-                            "source": "generic_processor",
-                            "kind": "reference",
-                        })),
-                    });
+                            segments.push(ModalitySegment {
+                                modality_type: ModalityType::Image,
+                                content,
+                                metadata: Some(json!({
+                                    "column": column,
+                                    "source": "generic_processor",
+                                    "kind": "reference",
+                                })),
+                            });
                         }
                     }
                 }
@@ -285,9 +285,9 @@ impl GenericDatasetProcessor {
     fn download_hf_reference(&self, uri: &str, dataset_cache: &Path) -> Result<Option<PathBuf>> {
         let config = HfResolverConfig::new(&self.dataset_name, dataset_cache);
         let resolver = HfResolver::new(config);
-        
+
         let is_image = HfResolver::is_image_path(uri);
-        
+
         match resolver.resolve_hf_uri(uri, is_image)? {
             Some(bytes) => {
                 // Extract path from URI for destination
@@ -299,7 +299,7 @@ impl GenericDatasetProcessor {
                 if relative.as_os_str().is_empty() {
                     return Ok(None);
                 }
-                
+
                 let dest = dataset_cache.join(&relative);
                 if let Some(parent) = dest.parent() {
                     fs::create_dir_all(parent)?;
@@ -318,19 +318,19 @@ impl GenericDatasetProcessor {
         cache_root: &Path,
     ) -> Result<Option<DownloadedFile>> {
         let is_image = HfResolver::is_image_path(target);
-        
+
         // Handle direct URLs
         if looks_like_url(target) {
             let filename = filename_from_url(target);
             let dest = dataset_cache.join(&filename);
-            
+
             match HfResolver::resolve_url_with_fallback(target, dataset_cache, is_image, false) {
                 Ok(Some(bytes)) => {
                     if let Some(parent) = dest.parent() {
                         fs::create_dir_all(parent).ok();
                     }
                     fs::write(&dest, &bytes)?;
-                    
+
                     return Ok(Some(DownloadedFile {
                         url: target.to_string(),
                         local_path: dest,
@@ -339,11 +339,11 @@ impl GenericDatasetProcessor {
                     }));
                 }
                 Ok(None) => {
-                    println!("    Warning: Unable to resolve URL {}", target);
+                    println!("    Warning: Unable to resolve URL {target}");
                     return Ok(None);
                 }
                 Err(err) => {
-                    eprintln!("Failed to download {}: {}", target, err);
+                    eprintln!("Failed to download {target}: {err}");
                     return Ok(None);
                 }
             }
@@ -362,11 +362,11 @@ impl GenericDatasetProcessor {
                     }));
                 }
                 Ok(None) => {
-                    println!("    Warning: Unable to resolve {}", target);
+                    println!("    Warning: Unable to resolve {target}");
                     return Ok(None);
                 }
                 Err(err) => {
-                    eprintln!("Failed to download {}: {}", target, err);
+                    eprintln!("Failed to download {target}: {err}");
                     return Ok(None);
                 }
             }
@@ -384,11 +384,11 @@ impl GenericDatasetProcessor {
                 }))
             }
             Ok(None) => {
-                println!("    Warning: Unable to resolve {}", target);
+                println!("    Warning: Unable to resolve {target}");
                 Ok(None)
             }
             Err(err) => {
-                eprintln!("Failed to download {}: {}", target, err);
+                eprintln!("Failed to download {target}: {err}");
                 Ok(None)
             }
         }
@@ -420,16 +420,13 @@ impl GenericDatasetProcessor {
         let config = HfResolverConfig::new(&self.dataset_name, dataset_cache);
         let resolver = HfResolver::new(config);
         let is_image = HfResolver::is_image_path(reference);
-        
-        match resolver.resolve_with_candidates(reference, is_image)? {
-            Some(bytes) => {
-                if let Some(parent) = dest.parent() {
-                    fs::create_dir_all(parent)?;
-                }
-                fs::write(&dest, &bytes)?;
-                return Ok(Some(dest));
+
+        if let Some(bytes) = resolver.resolve_with_candidates(reference, is_image)? {
+            if let Some(parent) = dest.parent() {
+                fs::create_dir_all(parent)?;
             }
-            None => {}
+            fs::write(&dest, &bytes)?;
+            return Ok(Some(dest));
         }
 
         // Try external sources as fallback
@@ -531,8 +528,7 @@ impl GenericDatasetProcessor {
             Ok(path) => path,
             Err(err) => {
                 println!(
-                    "      Warning: unable to fetch archive {} from {} ({:?})",
-                    archive_path, remote_dataset, err
+                    "      Warning: unable to fetch archive {archive_path} from {remote_dataset} ({err})"
                 );
                 return Ok(None);
             }
@@ -595,17 +591,11 @@ fn build_bbox_metadata(text: &str) -> Option<JsonMap<String, JsonValue>> {
 fn value_to_reference(value: &JsonValue) -> Option<String> {
     match value {
         JsonValue::String(s) => Some(s.to_string()),
-        JsonValue::Object(obj) => {
-            if let Some(path) = obj
-                .get("url")
-                .or_else(|| obj.get("path"))
-                .and_then(|v| v.as_str())
-            {
-                Some(path.to_string())
-            } else {
-                None
-            }
-        }
+        JsonValue::Object(obj) => obj
+            .get("url")
+            .or_else(|| obj.get("path"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
         _ => None,
     }
 }

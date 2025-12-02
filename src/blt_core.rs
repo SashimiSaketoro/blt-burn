@@ -6,7 +6,7 @@
 //! For hypersphere extensions (pre-norm embeddings, prominence, coherence), see `sphere_ext`.
 
 use burn::backend::wgpu::{Wgpu, WgpuDevice};
-use burn::tensor::{Int, Tensor};
+use burn::tensor::{Int, Tensor, Transaction};
 use serde::{Deserialize, Serialize};
 
 use crate::model::LMTransformer;
@@ -186,7 +186,8 @@ pub fn process_bytes_with_embeddings(
     let mask_tensor =
         patch_start_mask_from_entropy_with_monotonicity(entropies_tensor, config.threshold);
     let patch_indices_nested = patch_start_indices_cpu(mask_tensor);
-    let patch_lengths_nested = patch_lengths_from_start_indices(&patch_indices_nested, total_tokens);
+    let patch_lengths_nested =
+        patch_lengths_from_start_indices(&patch_indices_nested, total_tokens);
 
     let patch_lengths: Vec<i32> = patch_lengths_nested
         .first()
@@ -249,10 +250,13 @@ fn compute_entropies_chunked(
         let chunk = &tokens[start..end];
         let chunk_len = chunk.len();
 
-        let skip_count = if position == 0 { 0 } else { config.chunk_overlap };
+        let skip_count = if position == 0 {
+            0
+        } else {
+            config.chunk_overlap
+        };
 
-        let input =
-            Tensor::<Wgpu, 1, Int>::from_ints(chunk, device).reshape([1, chunk_len]);
+        let input = Tensor::<Wgpu, 1, Int>::from_ints(chunk, device).reshape([1, chunk_len]);
 
         let output = model.forward(input);
         let chunk_entropies = entropy(output);
@@ -262,14 +266,9 @@ fn compute_entropies_chunked(
         let entropies_slice: Vec<f32> = entropies_data.iter::<f32>().collect();
 
         // Only take the new tokens (skip overlap context)
-        let valid_start = skip_count;
-        let valid_end = chunk_len;
-
-        for i in valid_start..valid_end {
-            if all_entropies.len() < total_tokens {
-                all_entropies.push(entropies_slice[i]);
-            }
-        }
+        let remaining = total_tokens.saturating_sub(all_entropies.len());
+        let valid_slice = &entropies_slice[skip_count..chunk_len];
+        all_entropies.extend(valid_slice.iter().take(remaining).copied());
 
         position = end;
     }
@@ -311,24 +310,30 @@ fn compute_all_signals_chunked(
         let chunk = &tokens[start..end];
         let chunk_len = chunk.len();
 
-        let skip_count = if position == 0 { 0 } else { config.chunk_overlap };
+        let skip_count = if position == 0 {
+            0
+        } else {
+            config.chunk_overlap
+        };
 
-        let input =
-            Tensor::<Wgpu, 1, Int>::from_ints(chunk, device).reshape([1, chunk_len]);
+        let input = Tensor::<Wgpu, 1, Int>::from_ints(chunk, device).reshape([1, chunk_len]);
 
         let output = model.forward_with_embeddings(input);
 
         // Compute entropies from logits
         let chunk_entropies = entropy(output.logits);
 
-        // Extract all data to CPU
-        let entropies_data = chunk_entropies.into_data();
+        // Batch GPU->CPU transfers (single sync instead of 3)
+        let [entropies_data, embeddings_data, norms_data] = Transaction::default()
+            .register(chunk_entropies)
+            .register(output.pre_norm_embeddings)
+            .register(output.embedding_norms)
+            .execute()
+            .try_into()
+            .expect("Transaction should return 3 tensors");
+
         let entropies_slice: Vec<f32> = entropies_data.iter::<f32>().collect();
-
-        let embeddings_data = output.pre_norm_embeddings.into_data();
         let embeddings_slice: Vec<f32> = embeddings_data.iter::<f32>().collect();
-
-        let norms_data = output.embedding_norms.into_data();
         let norms_slice: Vec<f32> = norms_data.iter::<f32>().collect();
 
         // Only take the new tokens (skip overlap context)

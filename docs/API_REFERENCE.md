@@ -1091,7 +1091,7 @@ cargo run --bin ingest  # Uses cached model
 
 ```bash
 # Download the original Facebook model
-huggingface-cli download facebook/blt-entropy model.safetensors
+hf download facebook/blt-entropy model.safetensors
 
 # Or via Python
 from huggingface_hub import hf_hub_download

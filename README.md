@@ -151,7 +151,7 @@ The build script automatically detects the Facebook BLT entropy model in your Hu
 
 ```bash
 # Download the model first (if not already cached)
-huggingface-cli download facebook/blt-entropy model.safetensors
+hf download facebook/blt-entropy model.safetensors
 
 # Build/run - model is auto-detected from HF cache
 cargo build --release
@@ -190,6 +190,30 @@ cargo run --release --bin ingest -- \
 - ✅ **Water-Filling Ready** - Output format optimized for hypersphere pipelines
 - ✅ **Hypergraph Sidecar** - SQLite-based storage with explicit Trunk-Branch-Leaf topology alongside tensors
 - ✅ **JAX-Compatible Sharding** - Automatic dataset sharding for distributed processing
+
+### Sphere Pipeline Integration
+
+BLT-Burn is the embedding backend for [sphere-pipeline](../sphere-pipeline/README.md), which adds:
+
+```bash
+# Unified pipeline: BLT encoding → Sphere optimization → ROOTS index → Harmonics
+sphere-ingest --local-dir ./data --output ./corpus
+
+# Stream any HuggingFace dataset
+sphere-ingest --hf-dataset ytz20/LMSYS-Chat --text-column response --output ./corpus
+```
+
+**Polar Zone Architecture**: The sphere is divided into semantic zones:
+- **North pole (θ < 15°)**: Instruction zone (behavioral anchors)
+- **Equatorial torus**: Content zone (documents, facts)
+- **South pole (θ > 165°)**: QA pairs zone (fine-tuning examples)
+
+```bash
+# Force data to QA zone (south pole)
+sphere-ingest --hf-dataset org/qa-pairs --target-zone qa --output ./corpus
+```
+
+See [sphere-pipeline/README.md](../sphere-pipeline/README.md) for full documentation.
 
 ### Multimodal Pre-Tokenization
 

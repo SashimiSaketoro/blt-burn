@@ -50,7 +50,7 @@ pub fn load_hf_dataset(
     split: Option<&str>,
     limit: Option<usize>,
 ) -> Result<DataFrame> {
-    println!("Loading dataset {} with Polars...", dataset_name);
+    println!("Loading dataset {dataset_name} with Polars...");
 
     // Try to find and load the dataset file
     // Priority: JSON > Parquet > Arrow IPC
@@ -89,8 +89,7 @@ pub fn load_hf_dataset(
     }
 
     Err(DatasetLoaderError::FileNotFound(format!(
-        "Could not find dataset files for {} in JSON, Parquet, or Arrow IPC format",
-        dataset_name
+        "Could not find dataset files for {dataset_name} in JSON, Parquet, or Arrow IPC format"
     ))
     .into())
 }
@@ -110,7 +109,7 @@ fn try_load_json(
         .context("Could not find home directory")?;
 
     // Common JSON file patterns
-    let dataset_simple_name = dataset_name.split('/').last().unwrap_or(dataset_name);
+    let dataset_simple_name = dataset_name.split('/').next_back().unwrap_or(dataset_name);
     let json_patterns = vec![
         format!("{}.json", dataset_simple_name),
         format!("{}.json", dataset_name.replace('/', "-")),
@@ -121,8 +120,8 @@ fn try_load_json(
     // Also try split-specific files
     let mut all_patterns = json_patterns;
     if let Some(s) = split {
-        all_patterns.push(format!("{}.json", s));
-        all_patterns.push(format!("{}-{}.json", dataset_simple_name, s));
+        all_patterns.push(format!("{s}.json"));
+        all_patterns.push(format!("{dataset_simple_name}-{s}.json"));
     }
 
     // Try cache directory first
@@ -203,12 +202,11 @@ fn download_json_from_hub(dataset_name: &str, candidates: &[String]) -> Result<O
     for candidate in candidates {
         let mut attempts = Vec::with_capacity(2);
         attempts.push(candidate.clone());
-        attempts.push(format!("data/{}", candidate));
+        attempts.push(format!("data/{candidate}"));
 
         for attempt in attempts {
-            match repo.get(&attempt) {
-                Ok(path) => return Ok(Some(path)),
-                Err(_) => continue,
+            if let Ok(path) = repo.get(&attempt) {
+                return Ok(Some(path));
             }
         }
     }
@@ -415,8 +413,7 @@ fn try_load_arrow_ipc(
         Ok(df) => df,
         Err(err) => {
             println!(
-                "    Lazy IPC scan failed ({}), falling back to eager reader",
-                err
+                "    Lazy IPC scan failed ({err}), falling back to eager reader"
             );
             let file = std::fs::File::open(&arrow_file)
                 .map_err(|e| DatasetLoaderError::ReadError(e.to_string()))?;
@@ -442,8 +439,7 @@ fn read_parquet_file(path: &Path, limit: Option<usize>) -> Result<DataFrame> {
         Ok(df) => df,
         Err(err) => {
             println!(
-                "    Lazy Parquet scan failed ({}), falling back to eager reader",
-                err
+                "    Lazy Parquet scan failed ({err}), falling back to eager reader"
             );
             let file = std::fs::File::open(path)
                 .map_err(|e| DatasetLoaderError::ReadError(e.to_string()))?;
@@ -515,7 +511,7 @@ fn load_dataset_info_manifest(dataset_name: &str) -> Result<Option<DatasetInfoMa
     match repo.get("dataset_info.json") {
         Ok(path) => read_manifest_from_path(&path).map(Some),
         Err(err) => {
-            println!("    Unable to fetch dataset_info.json: {}", err);
+            println!("    Unable to fetch dataset_info.json: {err}");
             Ok(None)
         }
     }
@@ -565,10 +561,13 @@ pub fn row_to_json_value(df: &DataFrame, row_idx: usize) -> Result<serde_json::V
 }
 
 /// Convert a Column value at a specific index to JSON
-/// 
+///
 /// In Polars 0.46+, DataFrame.column() returns Column instead of Series.
 /// This function handles the Column type and delegates to series_to_json.
-fn series_value_to_json(column: &polars::frame::column::Column, idx: usize) -> Result<serde_json::Value> {
+fn series_value_to_json(
+    column: &polars::frame::column::Column,
+    idx: usize,
+) -> Result<serde_json::Value> {
     // Get the underlying series from the column
     let series = column.as_materialized_series();
     series_to_json(series, idx)
@@ -641,12 +640,12 @@ fn series_to_json(series: &Series, idx: usize) -> Result<serde_json::Value> {
             let struct_series = series
                 .struct_()
                 .map_err(|e| DatasetLoaderError::ReadError(e.to_string()))?;
-            
+
             // In Polars 0.46+, iterate over fields using fields_as_series()
             let field_series = struct_series.fields_as_series();
-            
+
             let mut map = serde_json::Map::new();
-            for field in field_series.iter() {
+            for field in &field_series {
                 let field_name = field.name().to_string();
                 let value = series_to_json(field, idx)?;
                 map.insert(field_name, value);
@@ -667,18 +666,22 @@ fn series_to_json(series: &Series, idx: usize) -> Result<serde_json::Value> {
     }
 }
 
-/// Extract a column as bytes (e.g. for images or binary data) without full JSON serialization
+/// Extract a column as bytes (e.g. for images or binary data) without full JSON serialization.
+///
+/// # Panics
+/// Panics if the row index is valid but the series value cannot be retrieved (should not happen
+/// after bounds check, but depends on Polars internals).
 pub fn get_column_as_bytes(df: &DataFrame, row_idx: usize, column_name: &str) -> Result<Vec<u8>> {
     let column = df
         .column(column_name)
-        .map_err(|_| DatasetLoaderError::ReadError(format!("Column {} not found", column_name)))?;
+        .map_err(|_| DatasetLoaderError::ReadError(format!("Column {column_name} not found")))?;
 
     // Get the underlying series from the column (Polars 0.46+)
     let series = column.as_materialized_series();
 
     if row_idx >= series.len() {
         return Err(
-            DatasetLoaderError::ReadError(format!("Row index {} out of bounds", row_idx)).into(),
+            DatasetLoaderError::ReadError(format!("Row index {row_idx} out of bounds")).into(),
         );
     }
 
@@ -723,7 +726,7 @@ pub fn extract_text_value(
 ) -> Result<Option<String>> {
     let column = df
         .column(column_name)
-        .map_err(|_| DatasetLoaderError::ReadError(format!("Column {} not found", column_name)))?;
+        .map_err(|_| DatasetLoaderError::ReadError(format!("Column {column_name} not found")))?;
 
     // Get the underlying series from the column (Polars 0.46+)
     let series = column.as_materialized_series();
@@ -762,7 +765,7 @@ pub fn extract_text_value(
             let value = series
                 .get(row_idx)
                 .map_err(|e| DatasetLoaderError::ReadError(e.to_string()))?;
-            Some(format!("{:?}", value))
+            Some(format!("{value:?}"))
         }
     };
 
@@ -777,7 +780,7 @@ pub fn extract_binary_value(
 ) -> Result<Option<Vec<u8>>> {
     let column = df
         .column(column_name)
-        .map_err(|_| DatasetLoaderError::ReadError(format!("Column {} not found", column_name)))?;
+        .map_err(|_| DatasetLoaderError::ReadError(format!("Column {column_name} not found")))?;
 
     // Get the underlying series from the column (Polars 0.46+)
     let series = column.as_materialized_series();
@@ -806,7 +809,7 @@ pub fn extract_binary_value(
             let value = series
                 .get(row_idx)
                 .map_err(|e| DatasetLoaderError::ReadError(e.to_string()))?;
-            Some(format!("{:?}", value).into_bytes())
+            Some(format!("{value:?}").into_bytes())
         }
     };
 
@@ -821,7 +824,7 @@ pub fn extract_list_json(
 ) -> Result<Option<serde_json::Value>> {
     let column = df
         .column(column_name)
-        .map_err(|_| DatasetLoaderError::ReadError(format!("Column {} not found", column_name)))?;
+        .map_err(|_| DatasetLoaderError::ReadError(format!("Column {column_name} not found")))?;
 
     if !matches!(column.dtype(), DataType::List(_)) {
         return Ok(None);
@@ -843,7 +846,7 @@ pub fn extract_struct_json(
 ) -> Result<Option<serde_json::Value>> {
     let column = df
         .column(column_name)
-        .map_err(|_| DatasetLoaderError::ReadError(format!("Column {} not found", column_name)))?;
+        .map_err(|_| DatasetLoaderError::ReadError(format!("Column {column_name} not found")))?;
 
     if !matches!(column.dtype(), DataType::Struct(_)) {
         return Ok(None);

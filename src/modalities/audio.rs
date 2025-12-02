@@ -60,7 +60,7 @@ impl ModalityPreTokenizer for AudioPreTokenizer {
                 &FormatOptions::default(),
                 &MetadataOptions::default(),
             )
-            .map_err(|e| anyhow::anyhow!("Failed to probe audio format: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to probe audio format: {e}"))?;
 
         let mut format = probed.format;
 
@@ -74,14 +74,11 @@ impl ModalityPreTokenizer for AudioPreTokenizer {
         // Create decoder for the track
         let mut decoder = symphonia::default::get_codecs()
             .make(&track.codec_params, &Default::default())
-            .map_err(|e| anyhow::anyhow!("Failed to create decoder: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to create decoder: {e}"))?;
 
         let track_id = track.id;
-        let actual_sample_rate = track
-            .codec_params
-            .sample_rate
-            .unwrap_or(self.sample_rate);
-        let channels = track.codec_params.channels.map(|c| c.count()).unwrap_or(1);
+        let actual_sample_rate = track.codec_params.sample_rate.unwrap_or(self.sample_rate);
+        let channels = track.codec_params.channels.map_or(1, |c| c.count());
 
         let mut segments = Vec::new();
         let mut byte_offset = 0;
@@ -98,7 +95,7 @@ impl ModalityPreTokenizer for AudioPreTokenizer {
                 }
                 Err(e) => {
                     // Log but continue - some packets may be recoverable
-                    eprintln!("Warning: Error reading audio packet: {}", e);
+                    eprintln!("Warning: Error reading audio packet: {e}");
                     break;
                 }
             };
@@ -148,12 +145,10 @@ impl ModalityPreTokenizer for AudioPreTokenizer {
                 }
                 Err(symphonia::core::errors::Error::DecodeError(msg)) => {
                     // Decode errors are sometimes recoverable
-                    eprintln!("Warning: Audio decode error (skipping): {}", msg);
-                    continue;
+                    eprintln!("Warning: Audio decode error (skipping): {msg}");
                 }
                 Err(e) => {
-                    eprintln!("Warning: Audio decode error: {}", e);
-                    continue;
+                    eprintln!("Warning: Audio decode error: {e}");
                 }
             }
         }
@@ -161,7 +156,7 @@ impl ModalityPreTokenizer for AudioPreTokenizer {
         Ok(segments)
     }
 
-    fn modality(&self) -> &str {
+    fn modality(&self) -> &'static str {
         "audio"
     }
 }
@@ -178,4 +173,3 @@ mod tests {
         assert_eq!(pretok.modality(), "audio");
     }
 }
-

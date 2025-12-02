@@ -10,11 +10,7 @@ use cubecl::{cube, prelude::*};
 
 /// Simple L2 Norm kernel - one thread per (batch, seq) position.
 #[cube(launch)]
-pub fn fused_l2_norm_kernel<F: Float>(
-    input: &Tensor<F>,
-    output: &mut Tensor<F>,
-    dim: u32,
-) {
+pub fn fused_l2_norm_kernel<F: Float>(input: &Tensor<F>, output: &mut Tensor<F>, dim: u32) {
     let batch_idx = ABSOLUTE_POS_X;
     let seq_idx = ABSOLUTE_POS_Y;
 
@@ -30,7 +26,7 @@ pub fn fused_l2_norm_kernel<F: Float>(
     let mut sum_sq = F::new(0.0);
     for i in 0..dim {
         let val = input[row_start + i];
-        sum_sq = sum_sq + val * val;
+        sum_sq += val * val;
     }
 
     let out_idx = batch_idx * seq_len + seq_idx;
@@ -62,7 +58,7 @@ pub fn fused_l2_norm_kernel_optimized<F: Float>(
     let mut i = lane_idx;
     while i < dim {
         let val = input[row_start + i];
-        local_sum_sq = local_sum_sq + val * val;
+        local_sum_sq += val * val;
         i += plane_size;
     }
     let sum_sq = plane_sum(local_sum_sq);
@@ -75,11 +71,7 @@ pub fn fused_l2_norm_kernel_optimized<F: Float>(
 
 /// Fused squared L2 norm kernel (avoids sqrt).
 #[cube(launch)]
-pub fn fused_l2_norm_squared_kernel<F: Float>(
-    input: &Tensor<F>,
-    output: &mut Tensor<F>,
-    dim: u32,
-) {
+pub fn fused_l2_norm_squared_kernel<F: Float>(input: &Tensor<F>, output: &mut Tensor<F>, dim: u32) {
     let batch_idx = ABSOLUTE_POS_X;
     let seq_idx = ABSOLUTE_POS_Y;
 
@@ -95,7 +87,7 @@ pub fn fused_l2_norm_squared_kernel<F: Float>(
     let mut sum_sq = F::new(0.0);
     for i in 0..dim {
         let val = input[row_start + i];
-        sum_sq = sum_sq + val * val;
+        sum_sq += val * val;
     }
 
     let out_idx = batch_idx * seq_len + seq_idx;

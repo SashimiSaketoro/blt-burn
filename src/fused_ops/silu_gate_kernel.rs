@@ -48,7 +48,7 @@ pub fn fused_silu_gate_kernel<F: Float>(
     // For numerical stability with large negative values:
     // sigmoid(x) = 1 / (1 + exp(-x)) for x >= 0
     // sigmoid(x) = exp(x) / (1 + exp(x)) for x < 0
-    
+
     // Simple version (works well for typical ranges):
     let sigmoid = F::new(1.0) / (F::new(1.0) + F::exp(F::new(0.0) - gate));
     let silu = gate * sigmoid;
@@ -71,4 +71,3 @@ pub fn fused_silu_kernel<F: Float>(input: &Tensor<F>, output: &mut Tensor<F>) {
     let sigmoid = F::new(1.0) / (F::new(1.0) + F::exp(F::new(0.0) - x));
     output[idx] = x * sigmoid;
 }
-

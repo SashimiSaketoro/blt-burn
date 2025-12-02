@@ -14,11 +14,7 @@ use cubecl::{cube, prelude::*};
 /// Simple fused entropy kernel: one thread handles one (batch, seq) position.
 /// Good for small vocab sizes or as a fallback.
 #[cube(launch)]
-pub fn fused_entropy_kernel<F: Float>(
-    logits: &Tensor<F>,
-    output: &mut Tensor<F>,
-    vocab_size: u32,
-) {
+pub fn fused_entropy_kernel<F: Float>(logits: &Tensor<F>, output: &mut Tensor<F>, vocab_size: u32) {
     let batch_idx = ABSOLUTE_POS_X;
     let seq_idx = ABSOLUTE_POS_Y;
 
@@ -41,7 +37,7 @@ pub fn fused_entropy_kernel<F: Float>(
     // Pass 2: Sum of exp(logits - max)
     let mut exp_sum = F::new(0.0);
     for i in 0..vocab_size {
-        exp_sum = exp_sum + F::exp(logits[row_start + i] - max_val);
+        exp_sum += F::exp(logits[row_start + i] - max_val);
     }
     let log_sum = F::log(exp_sum);
 
@@ -50,7 +46,7 @@ pub fn fused_entropy_kernel<F: Float>(
     for i in 0..vocab_size {
         let log_p = logits[row_start + i] - max_val - log_sum;
         let p = F::exp(log_p);
-        entropy = entropy - p * log_p;
+        entropy -= p * log_p;
     }
 
     let out_idx = batch_idx * seq_len + seq_idx;
@@ -100,7 +96,7 @@ pub fn fused_entropy_kernel_optimized<F: Float>(
     let mut local_exp_sum = F::new(0.0);
     let mut i = lane_idx;
     while i < vocab_size {
-        local_exp_sum = local_exp_sum + F::exp(logits[row_start + i] - max_val);
+        local_exp_sum += F::exp(logits[row_start + i] - max_val);
         i += plane_size;
     }
     let exp_sum = plane_sum(local_exp_sum);
@@ -112,7 +108,7 @@ pub fn fused_entropy_kernel_optimized<F: Float>(
     while i < vocab_size {
         let log_p = logits[row_start + i] - max_val - log_sum;
         let p = F::exp(log_p);
-        local_entropy = local_entropy - p * log_p;
+        local_entropy -= p * log_p;
         i += plane_size;
     }
     let entropy = plane_sum(local_entropy);

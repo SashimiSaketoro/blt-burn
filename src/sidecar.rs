@@ -182,9 +182,7 @@ impl HypergraphSidecar {
         // Insert edges - convert EdgeData + topology to HypergraphEdge format
         {
             let mut stmt = tx.prepare("INSERT INTO hyperedges (vertices, data) VALUES (?1, ?2)")?;
-            for (_edge_idx, (edge_data_idx, vertex_indices)) in
-                self.topology.edges.iter().enumerate()
-            {
+            for (edge_data_idx, vertex_indices) in &self.topology.edges {
                 if *edge_data_idx < self.edges.len() {
                     let edge_data = &self.edges[*edge_data_idx];
                     let edge = HypergraphEdge {
@@ -283,8 +281,8 @@ impl HypergraphSidecar {
     }
 }
 
-impl HypergraphBuilder {
-    pub fn new() -> Self {
+impl Default for HypergraphBuilder {
+    fn default() -> Self {
         Self {
             graph: Hypergraph::new(),
             nodes: Vec::new(),
@@ -294,8 +292,17 @@ impl HypergraphBuilder {
             topology_cache: Vec::new(),
         }
     }
+}
 
-    /// Add a node to the graph
+impl HypergraphBuilder {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Add a node to the graph.
+    ///
+    /// # Panics
+    /// Panics if the hypergraph library fails to add the vertex (should not happen).
     pub fn add_node(&mut self, data: NodeData) -> VertexIndex {
         let index = self.nodes.len();
         self.nodes.push(data);
@@ -304,7 +311,11 @@ impl HypergraphBuilder {
         v
     }
 
-    /// Add a hyperedge connecting multiple nodes
+    /// Add a hyperedge connecting multiple nodes.
+    ///
+    /// # Panics
+    /// - Panics if any vertex in `nodes` was not previously added via `add_node`.
+    /// - Panics if the hypergraph library fails to add the hyperedge.
     pub fn add_hyperedge(&mut self, nodes: Vec<VertexIndex>, data: EdgeData) -> HyperedgeIndex {
         let index = self.edges.len();
         self.edges.push(data);
@@ -344,7 +355,7 @@ impl HypergraphBuilder {
                         if let Some(source_id) = extra.get("source_id").and_then(|v| v.as_str()) {
                             source_groups
                                 .entry(source_id.to_string())
-                                .or_insert_with(Vec::new)
+                                .or_default()
                                 .push(*vertex_idx);
                         }
                     }
@@ -371,14 +382,14 @@ impl HypergraphBuilder {
     pub fn get_cross_view_groups(&self) -> HashMap<String, Vec<usize>> {
         let mut source_groups: HashMap<String, Vec<usize>> = HashMap::new();
 
-        for (_, node_idx) in &self.vertex_map {
+        for node_idx in self.vertex_map.values() {
             if let Some(NodeData::Leaf(segment)) = self.nodes.get(*node_idx) {
                 if let Some(ref metadata) = segment.metadata {
                     if let Some(ref extra) = metadata.extra {
                         if let Some(source_id) = extra.get("source_id").and_then(|v| v.as_str()) {
                             source_groups
                                 .entry(source_id.to_string())
-                                .or_insert_with(Vec::new)
+                                .or_default()
                                 .push(*node_idx);
                         }
                     }

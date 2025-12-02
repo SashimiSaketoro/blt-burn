@@ -6,9 +6,9 @@ use tree_sitter::{Language, Parser};
 
 // Symphonia imports for audio/video
 use symphonia::core::audio::SampleBuffer;
-use symphonia::core::codecs::CODEC_TYPE_NULL;
+use symphonia::core::codecs::{DecoderOptions, CODEC_TYPE_NULL};
 use symphonia::core::formats::FormatOptions;
-use symphonia::core::io::MediaSourceStream;
+use symphonia::core::io::{MediaSourceStream, MediaSourceStreamOptions};
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
 
@@ -25,9 +25,9 @@ use goblin::elf::Elf;
 pub trait ModalityPreTokenizer {
     /// Pre-tokenize input bytes into semantically meaningful segments
     fn pre_tokenize(&self, data: &[u8]) -> Result<Vec<ByteSegment>>;
-    
+
     /// Get the modality name for logging/debugging
-    fn modality(&self) -> &str;
+    fn modality(&self) -> &'static str;
 }
 
 /// A segment of bytes with optional metadata
@@ -36,10 +36,10 @@ pub struct ByteSegment {
     /// The raw bytes for this segment (skipped in serialization to keep metadata lightweight)
     #[serde(skip)]
     pub bytes: Vec<u8>,
-    
+
     /// Optional semantic label (e.g., "code_function", "image_patch", "audio_frame")
     pub label: Option<String>,
-    
+
     /// Optional metadata for this segment
     pub metadata: Option<SegmentMetadata>,
 }
@@ -48,13 +48,13 @@ pub struct ByteSegment {
 pub struct SegmentMetadata {
     /// Start position in original data
     pub start_offset: usize,
-    
+
     /// End position in original data
     pub end_offset: usize,
-    
+
     /// Confidence score for this segmentation (0.0 to 1.0)
     pub confidence: f32,
-    
+
     /// Additional modality-specific metadata
     pub extra: Option<serde_json::Value>,
 }
@@ -141,21 +141,21 @@ impl TextPreTokenizer {
     pub fn new(tokenizer: HFTokenizer) -> Self {
         Self { tokenizer }
     }
-    
+
     /// Create from a tokenizer file
     pub fn from_file(path: &str) -> Result<Self> {
         let tokenizer = HFTokenizer::from_file(path)
-            .map_err(|e| anyhow::anyhow!("Failed to load tokenizer: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to load tokenizer: {e}"))?;
         Ok(Self { tokenizer })
     }
-    
+
     /// Create a simple whitespace-based tokenizer as fallback
     pub fn new_simple() -> Result<Self> {
         use tokenizers::pre_tokenizers::whitespace::Whitespace;
         use tokenizers::{models::bpe::BPE, Tokenizer};
-        
+
         let mut tokenizer = Tokenizer::new(BPE::default());
-        tokenizer.with_pre_tokenizer(Some(Whitespace {}));     
+        tokenizer.with_pre_tokenizer(Some(Whitespace {}));
         Ok(Self { tokenizer })
     }
 }
@@ -163,35 +163,35 @@ impl TextPreTokenizer {
 impl ModalityPreTokenizer for TextPreTokenizer {
     fn pre_tokenize(&self, data: &[u8]) -> Result<Vec<ByteSegment>> {
         let text = String::from_utf8_lossy(data);
-        
+
         let encoding = self
             .tokenizer
             .encode(text.as_ref(), false)
-            .map_err(|e| anyhow::anyhow!("Encoding error: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Encoding error: {e}"))?;
         let tokens = encoding.get_tokens();
         let offsets = encoding.get_offsets();
-        
+
         let segments = tokens
             .iter()
             .zip(offsets.iter())
             .map(|(token, (start, end))| ByteSegment {
-                    bytes: data[*start..*end].to_vec(),
-                    label: Some("text_token".to_string()),
-                    metadata: Some(SegmentMetadata {
-                        start_offset: *start,
-                        end_offset: *end,
-                        confidence: 1.0,
-                        extra: Some(serde_json::json!({
-                            "token": token,
-                        })),
-                    }),
+                bytes: data[*start..*end].to_vec(),
+                label: Some("text_token".to_string()),
+                metadata: Some(SegmentMetadata {
+                    start_offset: *start,
+                    end_offset: *end,
+                    confidence: 1.0,
+                    extra: Some(serde_json::json!({
+                        "token": token,
+                    })),
+                }),
             })
             .collect();
-        
+
         Ok(segments)
     }
-    
-    fn modality(&self) -> &str {
+
+    fn modality(&self) -> &'static str {
         "text"
     }
 }
@@ -233,7 +233,7 @@ impl ModalityPreTokenizer for RawTextPreTokenizer {
         Ok(segments)
     }
 
-    fn modality(&self) -> &str {
+    fn modality(&self) -> &'static str {
         "text_raw"
     }
 }
@@ -275,7 +275,7 @@ impl ModalityPreTokenizer for ImagePreTokenizer {
     fn pre_tokenize(&self, data: &[u8]) -> Result<Vec<ByteSegment>> {
         // Decode image from bytes (supports PNG, JPEG, etc.)
         let img = image::load_from_memory(data)
-            .map_err(|e| anyhow::anyhow!("Failed to decode image: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to decode image: {e}"))?;
 
         // Convert to RGB8
         let rgb = img.to_rgb8();
@@ -338,7 +338,7 @@ impl ModalityPreTokenizer for ImagePreTokenizer {
             let this_entropy = this_meta["local_entropy"].as_f64().unwrap_or(0.0) as f32;
 
             // Merge threshold: low entropy implies uniform region
-            if (last_entropy + this_entropy) / 2.0 < 1.5 {
+            if f32::midpoint(last_entropy, this_entropy) < 1.5 {
                 let last_seg = merged.last_mut().unwrap();
                 last_seg.bytes.extend(&patch.bytes);
                 // Update metadata to reflect merged region
@@ -353,8 +353,8 @@ impl ModalityPreTokenizer for ImagePreTokenizer {
 
         Ok(merged)
     }
-    
-    fn modality(&self) -> &str {
+
+    fn modality(&self) -> &'static str {
         "image"
     }
 }
@@ -377,7 +377,7 @@ impl AudioPreTokenizer {
 impl ModalityPreTokenizer for AudioPreTokenizer {
     fn pre_tokenize(&self, data: &[u8]) -> Result<Vec<ByteSegment>> {
         // Use Symphonia to decode
-        let mss = MediaSourceStream::new(Box::new(Cursor::new(data.to_vec())), Default::default());
+        let mss = MediaSourceStream::new(Box::new(Cursor::new(data.to_vec())), MediaSourceStreamOptions::default());
 
         // Probe the media source
         let probed = symphonia::default::get_probe().format(
@@ -397,67 +397,63 @@ impl ModalityPreTokenizer for AudioPreTokenizer {
 
         // Use the default decoder for the track
         let mut decoder =
-            symphonia::default::get_codecs().make(&track.codec_params, &Default::default())?;
+            symphonia::default::get_codecs().make(&track.codec_params, &DecoderOptions::default())?;
         let track_id = track.id;
 
         let mut segments = Vec::new();
         let mut offset = 0;
-        
+
         // Decode loop
         loop {
             let packet = match format.next_packet() {
                 Ok(packet) => packet,
                 Err(symphonia::core::errors::Error::IoError(_)) => break, // End of stream
-                Err(e) => return Err(anyhow::anyhow!("Error reading packet: {}", e)),
+                Err(e) => return Err(anyhow::anyhow!("Error reading packet: {e}")),
             };
 
             if packet.track_id() != track_id {
                 continue;
             }
 
-            match decoder.decode(&packet) {
-                Ok(decoded) => {
-                    // Convert to 16-bit interleaved PCM
-                    let spec = *decoded.spec();
-                    let duration = decoded.capacity() as u64;
-                    let mut sample_buf = SampleBuffer::<i16>::new(duration, spec);
-                    sample_buf.copy_interleaved_ref(decoded);
+            if let Ok(decoded) = decoder.decode(&packet) {
+                // Convert to 16-bit interleaved PCM
+                let spec = *decoded.spec();
+                let duration = decoded.capacity() as u64;
+                let mut sample_buf = SampleBuffer::<i16>::new(duration, spec);
+                sample_buf.copy_interleaved_ref(decoded);
 
-                    let samples = sample_buf.samples();
-                    // Convert i16 samples to bytes
-                    let bytes: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
+                let samples = sample_buf.samples();
+                // Convert i16 samples to bytes
+                let bytes: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
 
-                    // Chunk into frame_size
-                    let bytes_per_frame = self.frame_size * 2; // i16 = 2 bytes
-                    for chunk in bytes.chunks(bytes_per_frame) {
-                        if chunk.len() == bytes_per_frame {
-                            // Only full frames? Or allow partial?
-            segments.push(ByteSegment {
-                                bytes: chunk.to_vec(),
-                label: Some("audio_frame".to_string()),
-                metadata: Some(SegmentMetadata {
-                    start_offset: offset,
-                                    end_offset: offset + chunk.len(),
-                    confidence: 1.0,
-                    extra: Some(serde_json::json!({
-                        "frame_index": segments.len(),
-                                                        "sample_rate": spec.rate,
-                                                        "channels": spec.channels.count()
-                    })),
-                }),
-            });
-                            offset += chunk.len();
-                        }
+                // Chunk into frame_size
+                let bytes_per_frame = self.frame_size * 2; // i16 = 2 bytes
+                for chunk in bytes.chunks(bytes_per_frame) {
+                    if chunk.len() == bytes_per_frame {
+                        segments.push(ByteSegment {
+                            bytes: chunk.to_vec(),
+                            label: Some("audio_frame".to_string()),
+                            metadata: Some(SegmentMetadata {
+                                start_offset: offset,
+                                end_offset: offset + chunk.len(),
+                                confidence: 1.0,
+                                extra: Some(serde_json::json!({
+                                    "frame_index": segments.len(),
+                                    "sample_rate": spec.rate,
+                                    "channels": spec.channels.count()
+                                })),
+                            }),
+                        });
+                        offset += chunk.len();
                     }
                 }
-                Err(_) => continue, // Skip decode errors
             }
         }
-        
+
         Ok(segments)
     }
-    
-    fn modality(&self) -> &str {
+
+    fn modality(&self) -> &'static str {
         "audio"
     }
 }
@@ -545,17 +541,15 @@ impl ModalityPreTokenizer for CodePreTokenizer {
                     }
                 }
             } else {
-                // Not a unit, descend
-                if !cursor.goto_first_child() {
-                    if !cursor.goto_next_sibling() {
+                // Not a unit, descend - try child, then sibling, then backtrack
+                if !cursor.goto_first_child() && !cursor.goto_next_sibling() {
+                    if !cursor.goto_parent() {
+                        break;
+                    }
+                    while !cursor.goto_next_sibling() {
                         if !cursor.goto_parent() {
+                            reached_leaf = true;
                             break;
-                        }
-                        while !cursor.goto_next_sibling() {
-                            if !cursor.goto_parent() {
-                                reached_leaf = true;
-                                break;
-                            }
                         }
                     }
                 }
@@ -579,7 +573,7 @@ impl ModalityPreTokenizer for CodePreTokenizer {
         Ok(segments)
     }
 
-    fn modality(&self) -> &str {
+    fn modality(&self) -> &'static str {
         "code_ast"
     }
 }
@@ -664,8 +658,7 @@ impl ModalityPreTokenizer for PdfPreTokenizer {
                     }
                     Err(e) => {
                         eprintln!(
-                            "Warning: Failed to extract text from PDF page {}: {}",
-                            page_num, e
+                            "Warning: Failed to extract text from PDF page {page_num}: {e}"
                         );
                     }
                 }
@@ -700,10 +693,7 @@ impl ModalityPreTokenizer for PdfPreTokenizer {
                         });
                     }
                     Err(e) => {
-                        eprintln!(
-                            "Warning: Failed to render PDF page {}: {}",
-                            page_num, e
-                        );
+                        eprintln!("Warning: Failed to render PDF page {page_num}: {e}");
                     }
                 }
             }
@@ -716,7 +706,7 @@ impl ModalityPreTokenizer for PdfPreTokenizer {
         Ok(segments)
     }
 
-    fn modality(&self) -> &str {
+    fn modality(&self) -> &'static str {
         "pdf"
     }
 }
@@ -832,7 +822,7 @@ impl ModalityPreTokenizer for VideoPreTokenizer {
         self.extract_with_ffmpeg(data)
     }
 
-    fn modality(&self) -> &str {
+    fn modality(&self) -> &'static str {
         "video"
     }
 }
@@ -843,7 +833,7 @@ impl ModalityPreTokenizer for VideoPreTokenizer {
         anyhow::bail!("Video support not compiled. Build with --features video and ensure FFmpeg is installed.")
     }
 
-    fn modality(&self) -> &str {
+    fn modality(&self) -> &'static str {
         "video"
     }
 }
@@ -854,7 +844,7 @@ pub struct BinaryPreTokenizer;
 impl ModalityPreTokenizer for BinaryPreTokenizer {
     fn pre_tokenize(&self, data: &[u8]) -> Result<Vec<ByteSegment>> {
         // Parse ELF
-        let elf = Elf::parse(data).map_err(|e| anyhow::anyhow!("Failed to parse ELF: {}", e))?;
+        let elf = Elf::parse(data).map_err(|e| anyhow::anyhow!("Failed to parse ELF: {e}"))?;
 
         let mut segments = Vec::new();
 
@@ -868,7 +858,7 @@ impl ModalityPreTokenizer for BinaryPreTokenizer {
 
                 segments.push(ByteSegment {
                     bytes: data[start..end].to_vec(),
-                    label: Some(format!("elf_section_{}", name)),
+                    label: Some(format!("elf_section_{name}")),
                     metadata: Some(SegmentMetadata {
                         start_offset: start,
                         end_offset: end,
@@ -878,11 +868,11 @@ impl ModalityPreTokenizer for BinaryPreTokenizer {
                 });
             }
         }
-        
+
         Ok(segments)
     }
-    
-    fn modality(&self) -> &str {
+
+    fn modality(&self) -> &'static str {
         "binary_elf"
     }
 }
@@ -892,12 +882,27 @@ impl ModalityPreTokenizer for BinaryPreTokenizer {
 pub enum PreTokenizerType {
     TextSimple,
     TextRaw, // Raw UTF-8 in the original BLT style
-    TextFromFile { path: String },
-    Image { patch_size: usize, stride: usize },
-    Audio { frame_size: usize, sample_rate: u32 },
-    Code { language: String },
-    Pdf { extract_text: bool, render_images: bool },
-    Video { frame_rate: u32 },
+    TextFromFile {
+        path: String,
+    },
+    Image {
+        patch_size: usize,
+        stride: usize,
+    },
+    Audio {
+        frame_size: usize,
+        sample_rate: u32,
+    },
+    Code {
+        language: String,
+    },
+    Pdf {
+        extract_text: bool,
+        render_images: bool,
+    },
+    Video {
+        frame_rate: u32,
+    },
     Binary,
 }
 
@@ -919,7 +924,13 @@ impl PreTokenizerType {
             PreTokenizerType::Code { language } => {
                 Ok(Box::new(CodePreTokenizer::new(language.clone())))
             }
-            PreTokenizerType::Pdf { extract_text, render_images } => Ok(Box::new(PdfPreTokenizer::new(*extract_text, *render_images))),
+            PreTokenizerType::Pdf {
+                extract_text,
+                render_images,
+            } => Ok(Box::new(PdfPreTokenizer::new(
+                *extract_text,
+                *render_images,
+            ))),
             PreTokenizerType::Video { frame_rate } => {
                 Ok(Box::new(VideoPreTokenizer::new(*frame_rate)))
             }

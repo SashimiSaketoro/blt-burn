@@ -25,9 +25,9 @@ fn entropy_reference<B: Backend>(scores: Tensor<B, 3>) -> Tensor<B, 2> {
 
 fn benchmark_entropy_direct(c: &mut Criterion) {
     use burn_wgpu::WgpuDevice;
-    
+
     let device = WgpuDevice::default();
-    
+
     // BLT typical dimensions
     let vocab_size = 260; // BLT vocab size
 
@@ -35,7 +35,7 @@ fn benchmark_entropy_direct(c: &mut Criterion) {
 
     // Test different sizes
     for (batch_size, seq_len) in [(2, 64), (4, 128), (8, 256)] {
-        let param_str = format!("b{}_s{}_v{}", batch_size, seq_len, vocab_size);
+        let param_str = format!("b{batch_size}_s{seq_len}_v{vocab_size}");
 
         // Pre-create a tensor to warm up the device
         let warmup = Tensor::<DirectBackend, 3>::random(
@@ -75,8 +75,7 @@ fn benchmark_entropy_direct(c: &mut Criterion) {
                         Distribution::Normal(0.0, 1.0),
                         &device,
                     );
-                    let result =
-                        blt_burn::fused_ops::fused_entropy(black_box(logits), vocab_size);
+                    let result = blt_burn::fused_ops::fused_entropy(black_box(logits), vocab_size);
                     // Force sync to measure actual GPU time
                     let _ = result.into_data();
                 });
@@ -89,9 +88,9 @@ fn benchmark_entropy_direct(c: &mut Criterion) {
 
 fn benchmark_all_fused_ops(c: &mut Criterion) {
     use burn_wgpu::WgpuDevice;
-    
+
     let device = WgpuDevice::default();
-    
+
     let mut group = c.benchmark_group("fused_ops");
     group.sample_size(50);
 
@@ -102,13 +101,21 @@ fn benchmark_all_fused_ops(c: &mut Criterion) {
     let vocab_size = 260;
 
     // Warmup
-    let warmup = Tensor::<DirectBackend, 3>::random([batch_size, seq_len, dim], Distribution::Normal(0.0, 1.0), &device);
+    let warmup = Tensor::<DirectBackend, 3>::random(
+        [batch_size, seq_len, dim],
+        Distribution::Normal(0.0, 1.0),
+        &device,
+    );
     let _ = warmup.into_data();
 
     // ========== RMS Norm ==========
     group.bench_function("rms_norm/reference", |b| {
         b.iter(|| {
-            let x = Tensor::<DirectBackend, 3>::random([batch_size, seq_len, dim], Distribution::Normal(0.0, 1.0), &device);
+            let x = Tensor::<DirectBackend, 3>::random(
+                [batch_size, seq_len, dim],
+                Distribution::Normal(0.0, 1.0),
+                &device,
+            );
             let weight = Tensor::<DirectBackend, 1>::ones([dim], &device);
             // Reference: x / sqrt(mean(x^2) + eps) * weight
             let squared = x.clone() * x.clone();
@@ -122,7 +129,11 @@ fn benchmark_all_fused_ops(c: &mut Criterion) {
     #[cfg(feature = "fused-entropy")]
     group.bench_function("rms_norm/fused", |b| {
         b.iter(|| {
-            let x = Tensor::<DirectBackend, 3>::random([batch_size, seq_len, dim], Distribution::Normal(0.0, 1.0), &device);
+            let x = Tensor::<DirectBackend, 3>::random(
+                [batch_size, seq_len, dim],
+                Distribution::Normal(0.0, 1.0),
+                &device,
+            );
             let weight = Tensor::<DirectBackend, 1>::ones([dim], &device);
             let result = blt_burn::fused_ops::fused_rms_norm(x, weight, 1e-6);
             let _ = result.into_data();
@@ -132,7 +143,11 @@ fn benchmark_all_fused_ops(c: &mut Criterion) {
     // ========== L2 Norm ==========
     group.bench_function("l2_norm/reference", |b| {
         b.iter(|| {
-            let x = Tensor::<DirectBackend, 3>::random([batch_size, seq_len, dim], Distribution::Normal(0.0, 1.0), &device);
+            let x = Tensor::<DirectBackend, 3>::random(
+                [batch_size, seq_len, dim],
+                Distribution::Normal(0.0, 1.0),
+                &device,
+            );
             let squared = x.clone() * x;
             let result = squared.sum_dim(2).sqrt().reshape([batch_size, seq_len]);
             let _ = result.into_data();
@@ -142,7 +157,11 @@ fn benchmark_all_fused_ops(c: &mut Criterion) {
     #[cfg(feature = "fused-entropy")]
     group.bench_function("l2_norm/fused", |b| {
         b.iter(|| {
-            let x = Tensor::<DirectBackend, 3>::random([batch_size, seq_len, dim], Distribution::Normal(0.0, 1.0), &device);
+            let x = Tensor::<DirectBackend, 3>::random(
+                [batch_size, seq_len, dim],
+                Distribution::Normal(0.0, 1.0),
+                &device,
+            );
             let result = blt_burn::fused_ops::fused_l2_norm(x);
             let _ = result.into_data();
         });
@@ -151,8 +170,16 @@ fn benchmark_all_fused_ops(c: &mut Criterion) {
     // ========== SiLU Gate ==========
     group.bench_function("silu_gate/reference", |b| {
         b.iter(|| {
-            let gate = Tensor::<DirectBackend, 3>::random([batch_size, seq_len, dim], Distribution::Normal(0.0, 1.0), &device);
-            let up = Tensor::<DirectBackend, 3>::random([batch_size, seq_len, dim], Distribution::Normal(0.0, 1.0), &device);
+            let gate = Tensor::<DirectBackend, 3>::random(
+                [batch_size, seq_len, dim],
+                Distribution::Normal(0.0, 1.0),
+                &device,
+            );
+            let up = Tensor::<DirectBackend, 3>::random(
+                [batch_size, seq_len, dim],
+                Distribution::Normal(0.0, 1.0),
+                &device,
+            );
             let result = burn::tensor::activation::silu(gate) * up;
             let _ = result.into_data();
         });
@@ -161,8 +188,16 @@ fn benchmark_all_fused_ops(c: &mut Criterion) {
     #[cfg(feature = "fused-entropy")]
     group.bench_function("silu_gate/fused", |b| {
         b.iter(|| {
-            let gate = Tensor::<DirectBackend, 3>::random([batch_size, seq_len, dim], Distribution::Normal(0.0, 1.0), &device);
-            let up = Tensor::<DirectBackend, 3>::random([batch_size, seq_len, dim], Distribution::Normal(0.0, 1.0), &device);
+            let gate = Tensor::<DirectBackend, 3>::random(
+                [batch_size, seq_len, dim],
+                Distribution::Normal(0.0, 1.0),
+                &device,
+            );
+            let up = Tensor::<DirectBackend, 3>::random(
+                [batch_size, seq_len, dim],
+                Distribution::Normal(0.0, 1.0),
+                &device,
+            );
             let result = blt_burn::fused_ops::fused_silu_gate(gate, up);
             let _ = result.into_data();
         });
@@ -171,7 +206,11 @@ fn benchmark_all_fused_ops(c: &mut Criterion) {
     // ========== Entropy ==========
     group.bench_function("entropy/reference", |b| {
         b.iter(|| {
-            let logits = Tensor::<DirectBackend, 3>::random([batch_size, seq_len, vocab_size], Distribution::Normal(0.0, 1.0), &device);
+            let logits = Tensor::<DirectBackend, 3>::random(
+                [batch_size, seq_len, vocab_size],
+                Distribution::Normal(0.0, 1.0),
+                &device,
+            );
             let result = entropy_reference(logits);
             let _ = result.into_data();
         });
@@ -180,7 +219,11 @@ fn benchmark_all_fused_ops(c: &mut Criterion) {
     #[cfg(feature = "fused-entropy")]
     group.bench_function("entropy/fused", |b| {
         b.iter(|| {
-            let logits = Tensor::<DirectBackend, 3>::random([batch_size, seq_len, vocab_size], Distribution::Normal(0.0, 1.0), &device);
+            let logits = Tensor::<DirectBackend, 3>::random(
+                [batch_size, seq_len, vocab_size],
+                Distribution::Normal(0.0, 1.0),
+                &device,
+            );
             let result = blt_burn::fused_ops::fused_entropy(logits, vocab_size);
             let _ = result.into_data();
         });

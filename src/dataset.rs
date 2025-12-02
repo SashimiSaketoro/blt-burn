@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FineWebItem {
     pub text: String,
-    pub id: Option<String>, 
+    pub id: Option<String>,
     pub url: Option<String>,
     // Allow other fields to be missing or ignored
 }
@@ -16,13 +16,18 @@ pub struct FineWebEduDataset {
 
 impl FineWebEduDataset {
     /// Create a new FineWebEduDataset for corpus ingestion.
-    /// 
+    ///
     /// # Arguments
     /// * `subset` - Dataset subset/configuration (e.g., "sample-10BT")
     /// * `partition` - HuggingFace partition name (usually "train" for full corpus - NOT a training split)
     /// * `base_dir` - Where burn stores its SQLite database
     /// * `hf_cache` - Optional HF cache override. If None, uses system default (respects symlinks)
-    pub fn new(subset: &str, partition: &str, base_dir: &str, hf_cache: Option<&str>) -> Result<Self, anyhow::Error> {
+    pub fn new(
+        subset: &str,
+        partition: &str,
+        base_dir: &str,
+        hf_cache: Option<&str>,
+    ) -> Result<Self, anyhow::Error> {
         // Use build-time detected venv if available
         if let (Some(venv_bin), Some(python_path)) = (
             option_env!("BLT_PYTHON_VENV_BIN"),
@@ -30,22 +35,22 @@ impl FineWebEduDataset {
         ) {
             // Prepend venv/bin to PATH so subprocesses use the venv's Python
             let current_path = std::env::var("PATH").unwrap_or_default();
-            std::env::set_var("PATH", format!("{}:{}", venv_bin, current_path));
+            std::env::set_var("PATH", format!("{venv_bin}:{current_path}"));
             std::env::set_var("PYTHON", python_path);
         }
-        
+
         // By default, let HuggingFace use its system cache (respects symlinks like ~/.cache/huggingface -> /Volumes/ai/)
         // Only override if user explicitly provides --hf-cache
         let mut loader = HuggingfaceDatasetLoader::new("HuggingFaceFW/fineweb-edu")
             .with_subset(subset)
-            .with_base_dir(base_dir)  // Where burn stores the SQLite DB
+            .with_base_dir(base_dir) // Where burn stores the SQLite DB
             .with_use_python_venv(false); // Don't create venv, use existing one from PATH
-        
+
         // Only set HF cache if explicitly overridden
         if let Some(cache_path) = hf_cache {
             loader = loader.with_huggingface_cache_dir(cache_path);
         }
-        
+
         let dataset = loader.dataset(partition)?;
 
         Ok(Self { dataset })
@@ -54,9 +59,13 @@ impl FineWebEduDataset {
     pub fn iter(&self) -> impl Iterator<Item = FineWebItem> + '_ {
         self.dataset.iter()
     }
-    
+
     pub fn len(&self) -> usize {
         self.dataset.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.dataset.is_empty()
     }
 }
 

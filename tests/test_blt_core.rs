@@ -3,7 +3,7 @@
 //! These tests verify the end-to-end BLT data flow:
 //! text → bytes → tokens → entropy_model → logits → entropy → patches
 
-use blt_burn::blt_core::{process_bytes, process_bytes_with_embeddings, BltConfig, BltExample};
+use blt_burn::blt_core::{process_bytes_with_embeddings, BltConfig, BltExample};
 use blt_burn::tokenizer::OFFSET;
 
 #[test]
@@ -64,11 +64,11 @@ fn test_token_decoding() {
 #[test]
 #[ignore]
 fn test_full_inference_with_model() {
+    use blt_burn::model::LMTransformerConfig;
     use burn::backend::wgpu::{Wgpu, WgpuDevice};
     use burn::module::Module;
     use burn::record::{FullPrecisionSettings, Recorder};
     use burn_import::safetensors::SafetensorsFileRecorder;
-    use blt_burn::model::LMTransformerConfig;
 
     let device = WgpuDevice::default();
 

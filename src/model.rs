@@ -16,10 +16,10 @@ use burn::{
 // ============================================================================
 
 /// Precompute the frequency tensor for RoPE (Rotary Position Embeddings).
-/// 
+///
 /// This follows the standard RoPE formulation from Su et al. (2021):
 /// freqs[i] = 1 / (θ^(2i/dim)) for i in 0..dim/2
-/// 
+///
 /// Returns tensor of shape [max_seqlen, head_dim/2, 2] containing [cos, sin] pairs
 pub fn precompute_freqs_cis<B: Backend>(
     head_dim: usize,
@@ -28,15 +28,15 @@ pub fn precompute_freqs_cis<B: Backend>(
     device: &B::Device,
 ) -> Tensor<B, 3> {
     let half_dim = head_dim / 2;
-    
+
     // Compute inverse frequencies: 1 / (θ^(2i/dim))
     let inv_freq: Vec<f32> = (0..half_dim)
         .map(|i| 1.0 / theta.powf((2 * i) as f64 / head_dim as f64) as f32)
         .collect();
-    
+
     // Create position indices [0, 1, 2, ..., max_seqlen-1]
     let positions: Vec<f32> = (0..max_seqlen).map(|i| i as f32).collect();
-    
+
     // Compute outer product: positions × inv_freq -> [max_seqlen, half_dim]
     let mut freqs_data = Vec::with_capacity(max_seqlen * half_dim * 2);
     for pos in &positions {
@@ -46,21 +46,21 @@ pub fn precompute_freqs_cis<B: Backend>(
             freqs_data.push(angle.sin()); // sin component
         }
     }
-    
+
     // Return as [max_seqlen, half_dim, 2]
     Tensor::<B, 1>::from_floats(&freqs_data[..], device).reshape([max_seqlen, half_dim, 2])
 }
 
 /// Apply rotary position embeddings to query and key tensors.
-/// 
+///
 /// Input shapes:
 /// - xq: [batch, seq_len, n_heads, head_dim]
 /// - xk: [batch, seq_len, n_kv_heads, head_dim]  
 /// - freqs_cis: [max_seqlen, head_dim/2, 2]
-/// 
+///
 /// The rotation is applied as:
 /// x_rot = x * cos(θ) + rotate_half(x) * sin(θ)
-/// 
+///
 /// where rotate_half swaps and negates adjacent pairs.
 pub fn apply_rotary_emb<B: Backend>(
     xq: Tensor<B, 4>,
@@ -70,23 +70,36 @@ pub fn apply_rotary_emb<B: Backend>(
     let [batch_size, seq_len, n_heads, head_dim] = xq.dims();
     let [_, _, n_kv_heads, _] = xk.dims();
     let half_dim = head_dim / 2;
-    
+
     // Slice freqs_cis to match sequence length: [seq_len, half_dim, 2]
     let freqs = freqs_cis.slice([0..seq_len, 0..half_dim, 0..2]);
-    
+
     // Extract cos and sin components
     // freqs[:, :, 0] = cos, freqs[:, :, 1] = sin
-    let cos_freqs = freqs.clone().slice([0..seq_len, 0..half_dim, 0..1])
+    let cos_freqs = freqs
+        .clone()
+        .slice([0..seq_len, 0..half_dim, 0..1])
         .reshape([1, seq_len, 1, half_dim]); // [1, seq_len, 1, half_dim]
-    let sin_freqs = freqs.slice([0..seq_len, 0..half_dim, 1..2])
+    let sin_freqs = freqs
+        .slice([0..seq_len, 0..half_dim, 1..2])
         .reshape([1, seq_len, 1, half_dim]); // [1, seq_len, 1, half_dim]
-    
+
     // Apply rotation to queries
-    let xq_rot = apply_rope_single(xq, cos_freqs.clone(), sin_freqs.clone(), batch_size, seq_len, n_heads, head_dim);
-    
+    let xq_rot = apply_rope_single(
+        xq,
+        cos_freqs.clone(),
+        sin_freqs.clone(),
+        batch_size,
+        seq_len,
+        n_heads,
+        head_dim,
+    );
+
     // Apply rotation to keys
-    let xk_rot = apply_rope_single(xk, cos_freqs, sin_freqs, batch_size, seq_len, n_kv_heads, head_dim);
-    
+    let xk_rot = apply_rope_single(
+        xk, cos_freqs, sin_freqs, batch_size, seq_len, n_kv_heads, head_dim,
+    );
+
     (xq_rot, xk_rot)
 }
 
@@ -101,44 +114,43 @@ fn apply_rope_single<B: Backend>(
     head_dim: usize,
 ) -> Tensor<B, 4> {
     let half_dim = head_dim / 2;
-    
+
     // Reshape x to [batch, seq, heads, 2, half_dim] to separate pairs
     let x_reshaped = x.reshape([batch_size, seq_len, n_heads, 2, half_dim]);
-    
+
     // Extract even and odd indices (x1 and x2 in the rotation formula)
-    let x1 = x_reshaped.clone().slice([0..batch_size, 0..seq_len, 0..n_heads, 0..1, 0..half_dim])
+    let x1 = x_reshaped
+        .clone()
+        .slice([0..batch_size, 0..seq_len, 0..n_heads, 0..1, 0..half_dim])
         .reshape([batch_size, seq_len, n_heads, half_dim]);
-    let x2 = x_reshaped.slice([0..batch_size, 0..seq_len, 0..n_heads, 1..2, 0..half_dim])
+    let x2 = x_reshaped
+        .slice([0..batch_size, 0..seq_len, 0..n_heads, 1..2, 0..half_dim])
         .reshape([batch_size, seq_len, n_heads, half_dim]);
-    
+
     // Broadcast cos/sin to [batch, seq, heads, half_dim]
     let cos_broad = cos_freqs.repeat_dim(0, batch_size).repeat_dim(2, n_heads);
     let sin_broad = sin_freqs.repeat_dim(0, batch_size).repeat_dim(2, n_heads);
-    
+
     // Apply rotation:
     // x1_rot = x1 * cos - x2 * sin
     // x2_rot = x1 * sin + x2 * cos
     let x1_rot = x1.clone() * cos_broad.clone() - x2.clone() * sin_broad.clone();
     let x2_rot = x1 * sin_broad + x2 * cos_broad;
-    
+
     // Interleave x1_rot and x2_rot back to original shape
     // Stack along new dim then reshape
     let x1_expanded = x1_rot.reshape([batch_size, seq_len, n_heads, 1, half_dim]);
     let x2_expanded = x2_rot.reshape([batch_size, seq_len, n_heads, 1, half_dim]);
-    
+
     // Concatenate and reshape back to [batch, seq, heads, head_dim]
-    Tensor::cat(vec![x1_expanded, x2_expanded], 3)
-        .reshape([batch_size, seq_len, n_heads, head_dim])
+    Tensor::cat(vec![x1_expanded, x2_expanded], 3).reshape([batch_size, seq_len, n_heads, head_dim])
 }
 
 /// Create a causal attention mask for autoregressive attention.
-/// 
+///
 /// Returns a mask where position i can only attend to positions 0..=i
 /// Mask values: 0.0 for allowed positions, -inf for masked positions
-pub fn create_causal_mask<B: Backend>(
-    seq_len: usize,
-    device: &B::Device,
-) -> Tensor<B, 2> {
+pub fn create_causal_mask<B: Backend>(seq_len: usize, device: &B::Device) -> Tensor<B, 2> {
     // Create lower triangular mask
     let mut mask_data = vec![0.0f32; seq_len * seq_len];
     for i in 0..seq_len {
@@ -263,12 +275,8 @@ impl<B: Backend + crate::fused_ops::FusedEntropyBackend> LMTransformer<B> {
         let mut x = self.tok_embeddings.forward(input);
 
         // Precompute RoPE frequencies for this sequence
-        let freqs_cis = precompute_freqs_cis::<B>(
-            self.head_dim,
-            self.max_seqlen,
-            self.rope_theta,
-            &device,
-        );
+        let freqs_cis =
+            precompute_freqs_cis::<B>(self.head_dim, self.max_seqlen, self.rope_theta, &device);
 
         // Create causal mask for attention
         let causal_mask = create_causal_mask::<B>(seq_len, &device);
@@ -320,12 +328,8 @@ impl<B: Backend + crate::fused_ops::FusedEntropyBackend> LMTransformer<B> {
         let mut x = self.tok_embeddings.forward(input);
 
         // Precompute RoPE frequencies
-        let freqs_cis = precompute_freqs_cis::<B>(
-            self.head_dim,
-            self.max_seqlen,
-            self.rope_theta,
-            &device,
-        );
+        let freqs_cis =
+            precompute_freqs_cis::<B>(self.head_dim, self.max_seqlen, self.rope_theta, &device);
 
         // Create causal mask
         let causal_mask = create_causal_mask::<B>(seq_len, &device);
@@ -359,12 +363,8 @@ impl<B: Backend> LMTransformer<B> {
         let mut x = self.tok_embeddings.forward(input);
 
         // Precompute RoPE frequencies for this sequence
-        let freqs_cis = precompute_freqs_cis::<B>(
-            self.head_dim,
-            self.max_seqlen,
-            self.rope_theta,
-            &device,
-        );
+        let freqs_cis =
+            precompute_freqs_cis::<B>(self.head_dim, self.max_seqlen, self.rope_theta, &device);
 
         // Create causal mask for attention
         let causal_mask = create_causal_mask::<B>(seq_len, &device);
@@ -416,12 +416,8 @@ impl<B: Backend> LMTransformer<B> {
         let mut x = self.tok_embeddings.forward(input);
 
         // Precompute RoPE frequencies
-        let freqs_cis = precompute_freqs_cis::<B>(
-            self.head_dim,
-            self.max_seqlen,
-            self.rope_theta,
-            &device,
-        );
+        let freqs_cis =
+            precompute_freqs_cis::<B>(self.head_dim, self.max_seqlen, self.rope_theta, &device);
 
         // Create causal mask
         let causal_mask = create_causal_mask::<B>(seq_len, &device);
@@ -471,12 +467,10 @@ impl TransformerBlockConfig {
 
         let ffn_dim = self
             .ffn_dim_multiplier
-            .map(|m| (m * self.dim as f64) as usize)
-            .unwrap_or(self.dim * 4);
+            .map_or(self.dim * 4, |m| (m * self.dim as f64) as usize);
 
         // Round up to multiple_of
-        let ffn_dim_rounded =
-            self.multiple_of * ((ffn_dim + self.multiple_of - 1) / self.multiple_of);
+        let ffn_dim_rounded = self.multiple_of * ffn_dim.div_ceil(self.multiple_of);
 
         let feed_forward = FeedForwardConfig {
             dim: self.dim,
@@ -518,11 +512,12 @@ impl<B: Backend> TransformerBlock<B> {
         causal_mask: Tensor<B, 2>,
     ) -> Tensor<B, 3> {
         // Pre-norm architecture with RoPE
-        let h = x.clone() + self.attention.forward_with_rope(
-            self.attention_norm.forward(x),
-            freqs_cis,
-            causal_mask,
-        );
+        let h = x.clone()
+            + self.attention.forward_with_rope(
+                self.attention_norm.forward(x),
+                freqs_cis,
+                causal_mask,
+            );
         h.clone() + self.feed_forward.forward(self.ffn_norm.forward(h))
     }
 }
@@ -620,7 +615,7 @@ impl<B: Backend> Attention<B> {
     }
 
     /// Forward pass with RoPE (Rotary Position Embeddings) and causal attention mask
-    /// 
+    ///
     /// This is the correct implementation following Meta's BLT architecture.
     pub fn forward_with_rope(
         &self,
@@ -684,14 +679,14 @@ impl<B: Backend> Attention<B> {
         // x: [batch, n_kv_heads, seq, head_dim]
         // output: [batch, n_kv_heads * n_rep, seq, head_dim]
         let [batch_size, n_kv_heads, seq_len, head_dim] = x.dims();
-        
+
         // Expand and reshape to repeat each head n_rep times
         // [batch, kv_heads, seq, dim] -> [batch, kv_heads, 1, seq, dim]
         let x = x.reshape([batch_size, n_kv_heads, 1, seq_len, head_dim]);
-        
+
         // Repeat along the new dimension
         let x = x.repeat_dim(2, n_rep);
-        
+
         // Reshape to merge kv_heads and rep dimensions
         x.reshape([batch_size, n_kv_heads * n_rep, seq_len, head_dim])
     }

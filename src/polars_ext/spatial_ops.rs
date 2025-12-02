@@ -18,10 +18,10 @@ impl BBox {
     }
 
     pub fn centroid(&self) -> (f64, f64) {
-        let cx = (self.x1 + self.x2) / 2.0;
-        let cy = (self.y1 + self.y2) / 2.0;
+        let cx = f64::midpoint(self.x1, self.x2);
+        let cy = f64::midpoint(self.y1, self.y2);
         (cx, cy)
-}
+    }
 
     pub fn normalize(&self, width: f64, height: f64) -> Self {
         Self {
@@ -36,6 +36,9 @@ impl BBox {
 static BOX_RE: OnceLock<Regex> = OnceLock::new();
 
 /// Extract bounding boxes encoded inside text spans, e.g. `<box>[x1,y1,x2,y2]</box>`.
+///
+/// # Panics
+/// Panics if the internal bounding box regex is invalid (compile-time constant, should never fail).
 pub fn extract_bboxes_from_text(text: &str) -> Vec<BBox> {
     let regex = BOX_RE.get_or_init(|| {
         Regex::new(

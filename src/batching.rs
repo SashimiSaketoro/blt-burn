@@ -1,7 +1,7 @@
 //! Smart batching utilities for BLT ingestion pipeline
 //!
 //! # Important Constraint: Hypergraph Sidecar Integrity
-//! 
+//!
 //! Each document MUST be processed individually through the BLT model because:
 //! 1. Entropy is calculated with sliding window context
 //! 2. Mixing documents would corrupt entropy boundaries
@@ -42,7 +42,7 @@ impl SizeBucket {
             _ => Self::Huge,
         }
     }
-    
+
     /// Get the bucket's name for logging
     pub fn name(&self) -> &'static str {
         match self {
@@ -78,33 +78,51 @@ impl BatchStats {
             SizeBucket::Huge => self.huge_count += 1,
         }
     }
-    
+
     /// Print a summary of batch statistics
     pub fn print_summary(&self) {
-        let total = self.tiny_count + self.small_count + self.medium_count 
-                  + self.large_count + self.huge_count;
+        let total = self.tiny_count
+            + self.small_count
+            + self.medium_count
+            + self.large_count
+            + self.huge_count;
         println!("📊 Document size distribution:");
-        println!("   Tiny (<512B):     {} ({:.1}%)", 
-                 self.tiny_count, 100.0 * self.tiny_count as f64 / total.max(1) as f64);
-        println!("   Small (512B-2KB): {} ({:.1}%)", 
-                 self.small_count, 100.0 * self.small_count as f64 / total.max(1) as f64);
-        println!("   Medium (2KB-8KB): {} ({:.1}%)", 
-                 self.medium_count, 100.0 * self.medium_count as f64 / total.max(1) as f64);
-        println!("   Large (8KB-32KB): {} ({:.1}%)", 
-                 self.large_count, 100.0 * self.large_count as f64 / total.max(1) as f64);
-        println!("   Huge (>32KB):     {} ({:.1}%)", 
-                 self.huge_count, 100.0 * self.huge_count as f64 / total.max(1) as f64);
+        println!(
+            "   Tiny (<512B):     {} ({:.1}%)",
+            self.tiny_count,
+            100.0 * self.tiny_count as f64 / total.max(1) as f64
+        );
+        println!(
+            "   Small (512B-2KB): {} ({:.1}%)",
+            self.small_count,
+            100.0 * self.small_count as f64 / total.max(1) as f64
+        );
+        println!(
+            "   Medium (2KB-8KB): {} ({:.1}%)",
+            self.medium_count,
+            100.0 * self.medium_count as f64 / total.max(1) as f64
+        );
+        println!(
+            "   Large (8KB-32KB): {} ({:.1}%)",
+            self.large_count,
+            100.0 * self.large_count as f64 / total.max(1) as f64
+        );
+        println!(
+            "   Huge (>32KB):     {} ({:.1}%)",
+            self.huge_count,
+            100.0 * self.huge_count as f64 / total.max(1) as f64
+        );
         println!("   Total: {} docs, {} bytes", total, self.total_bytes);
     }
 }
 
 /// Sort documents by length for more efficient processing
-/// 
+///
 /// Processing similar-sized documents together:
 /// 1. Reduces variance in GPU kernel launch overhead
 /// 2. Makes memory allocation patterns more predictable
 /// 3. Allows autotune cache to be more effective
-/// 
+///
 /// # Note
 /// This collects documents into memory for sorting. For very large datasets,
 /// consider using bucket-based streaming instead.
@@ -114,7 +132,7 @@ pub fn sort_by_length(mut docs: Vec<PrefetchedDoc>) -> Vec<PrefetchedDoc> {
 }
 
 /// Sort documents by length in descending order (longest first)
-/// 
+///
 /// Processing longest documents first can be beneficial for:
 /// 1. Failing fast if a document is too large
 /// 2. Front-loading the most expensive work
@@ -125,10 +143,12 @@ pub fn sort_by_length_desc(mut docs: Vec<PrefetchedDoc>) -> Vec<PrefetchedDoc> {
 }
 
 /// Group documents into size buckets
-/// 
+///
 /// Returns documents organized by bucket for batch processing.
 /// Each bucket can be processed with similar GPU kernel configurations.
-pub fn bucket_by_size(docs: Vec<PrefetchedDoc>) -> std::collections::HashMap<SizeBucket, Vec<PrefetchedDoc>> {
+pub fn bucket_by_size(
+    docs: Vec<PrefetchedDoc>,
+) -> std::collections::HashMap<SizeBucket, Vec<PrefetchedDoc>> {
     let mut buckets = std::collections::HashMap::new();
     for doc in docs {
         let bucket = SizeBucket::from_len(doc.original_len);
@@ -138,7 +158,7 @@ pub fn bucket_by_size(docs: Vec<PrefetchedDoc>) -> std::collections::HashMap<Siz
 }
 
 /// Streaming length-sorted iterator
-/// 
+///
 /// For large datasets where we can't load all documents into memory,
 /// this provides a sliding window approach that maintains approximate
 /// length ordering within windows.
@@ -149,7 +169,7 @@ pub struct LengthSortedWindow {
 
 impl LengthSortedWindow {
     /// Create a new length-sorted window
-    /// 
+    ///
     /// # Arguments
     /// * `window_size` - Number of documents to buffer for sorting (default: 100)
     pub fn new(window_size: usize) -> Self {
@@ -158,13 +178,13 @@ impl LengthSortedWindow {
             window_size,
         }
     }
-    
+
     /// Add a document to the window
-    /// 
+    ///
     /// Returns sorted documents if window is full, otherwise None
     pub fn add(&mut self, doc: PrefetchedDoc) -> Option<Vec<PrefetchedDoc>> {
         self.window.push(doc);
-        
+
         if self.window.len() >= self.window_size {
             let mut result = std::mem::take(&mut self.window);
             result.sort_by_key(|d| d.original_len);
@@ -174,7 +194,7 @@ impl LengthSortedWindow {
             None
         }
     }
-    
+
     /// Flush remaining documents (call at end of iteration)
     pub fn flush(&mut self) -> Vec<PrefetchedDoc> {
         let mut result = std::mem::take(&mut self.window);
@@ -186,7 +206,7 @@ impl LengthSortedWindow {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     fn make_doc(id: &str, len: usize) -> PrefetchedDoc {
         PrefetchedDoc {
             id: id.to_string(),
@@ -194,7 +214,7 @@ mod tests {
             original_len: len,
         }
     }
-    
+
     #[test]
     fn test_size_bucket_classification() {
         assert_eq!(SizeBucket::from_len(100), SizeBucket::Tiny);
@@ -206,23 +226,19 @@ mod tests {
         assert_eq!(SizeBucket::from_len(8192), SizeBucket::Large);
         assert_eq!(SizeBucket::from_len(32767), SizeBucket::Large);
         assert_eq!(SizeBucket::from_len(32768), SizeBucket::Huge);
-        assert_eq!(SizeBucket::from_len(100000), SizeBucket::Huge);
+        assert_eq!(SizeBucket::from_len(100_000), SizeBucket::Huge);
     }
-    
+
     #[test]
     fn test_sort_by_length() {
-        let docs = vec![
-            make_doc("c", 3000),
-            make_doc("a", 100),
-            make_doc("b", 1000),
-        ];
-        
+        let docs = vec![make_doc("c", 3000), make_doc("a", 100), make_doc("b", 1000)];
+
         let sorted = sort_by_length(docs);
         assert_eq!(sorted[0].id, "a");
         assert_eq!(sorted[1].id, "b");
         assert_eq!(sorted[2].id, "c");
     }
-    
+
     #[test]
     fn test_bucket_by_size() {
         let docs = vec![
@@ -231,42 +247,42 @@ mod tests {
             make_doc("medium", 4000),
             make_doc("tiny2", 200),
         ];
-        
+
         let buckets = bucket_by_size(docs);
         assert_eq!(buckets.get(&SizeBucket::Tiny).unwrap().len(), 2);
         assert_eq!(buckets.get(&SizeBucket::Small).unwrap().len(), 1);
         assert_eq!(buckets.get(&SizeBucket::Medium).unwrap().len(), 1);
     }
-    
+
     #[test]
     fn test_length_sorted_window() {
         let mut window = LengthSortedWindow::new(3);
-        
+
         // Add docs one by one
         assert!(window.add(make_doc("c", 3000)).is_none());
         assert!(window.add(make_doc("a", 100)).is_none());
-        
+
         // Third doc triggers flush
         let batch = window.add(make_doc("b", 500)).unwrap();
         assert_eq!(batch.len(), 3);
-        assert_eq!(batch[0].id, "a");  // 100 bytes
-        assert_eq!(batch[1].id, "b");  // 500 bytes
-        assert_eq!(batch[2].id, "c");  // 3000 bytes
-        
+        assert_eq!(batch[0].id, "a"); // 100 bytes
+        assert_eq!(batch[1].id, "b"); // 500 bytes
+        assert_eq!(batch[2].id, "c"); // 3000 bytes
+
         // Final flush
         window.add(make_doc("d", 200));
         let remaining = window.flush();
         assert_eq!(remaining.len(), 1);
     }
-    
+
     #[test]
     fn test_batch_stats() {
         let mut stats = BatchStats::default();
-        stats.add(&make_doc("a", 100));   // tiny
-        stats.add(&make_doc("b", 1000));  // small
-        stats.add(&make_doc("c", 4000));  // medium
-        stats.add(&make_doc("d", 50));    // tiny
-        
+        stats.add(&make_doc("a", 100)); // tiny
+        stats.add(&make_doc("b", 1000)); // small
+        stats.add(&make_doc("c", 4000)); // medium
+        stats.add(&make_doc("d", 50)); // tiny
+
         assert_eq!(stats.tiny_count, 2);
         assert_eq!(stats.small_count, 1);
         assert_eq!(stats.medium_count, 1);

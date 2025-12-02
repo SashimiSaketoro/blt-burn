@@ -1,3 +1,6 @@
+// CubeCL macro-generated code triggers these - not fixable
+#![allow(clippy::format_push_string)]
+
 //! Fused CubeCL operations for BLT.
 //!
 //! This module provides custom CubeCL kernels that fuse multiple operations
@@ -28,7 +31,7 @@
 //!
 //! ```ignore
 //! use burn_wgpu::{WgpuRuntime, CubeBackend};
-//! 
+//!
 //! // For maximum performance with fused kernels:
 //! type FastBackend = CubeBackend<WgpuRuntime, f32, i32, u32>;
 //!
@@ -36,8 +39,10 @@
 //! type Backend = burn::backend::wgpu::Wgpu;
 //! ```
 
+mod attention_kernel;
 mod backend;
 mod coherence_kernel;
+mod hash_embedding_kernel;
 mod kernel;
 mod l2_norm_kernel;
 mod rms_norm_kernel;
@@ -93,6 +98,49 @@ pub trait FusedOpsBackend: Backend {
         norms: FloatTensor<Self>,
         entropies: FloatTensor<Self>,
         epsilon: f32,
+    ) -> FloatTensor<Self>;
+
+    /// Fused scaled dot-product attention.
+    /// q: [batch, n_heads, seq_q, head_dim]
+    /// k: [batch, n_heads, seq_kv, head_dim]
+    /// v: [batch, n_heads, seq_kv, head_dim]
+    /// Output: [batch, n_heads, seq_q, head_dim]
+    fn fused_attention(
+        q: FloatTensor<Self>,
+        k: FloatTensor<Self>,
+        v: FloatTensor<Self>,
+        head_dim: usize,
+        use_causal_mask: bool,
+    ) -> FloatTensor<Self>;
+
+    /// Fused cross-attention for byte→patch pooling.
+    /// q: [batch, n_patches, n_heads, head_dim]
+    /// k: [batch, n_bytes, n_heads, head_dim]
+    /// v: [batch, n_bytes, n_heads, head_dim]
+    /// Output: [batch, n_patches, n_heads, head_dim]
+    fn fused_cross_attention(
+        q: FloatTensor<Self>,
+        k: FloatTensor<Self>,
+        v: FloatTensor<Self>,
+        head_dim: usize,
+    ) -> FloatTensor<Self>;
+
+    /// Fused rolling polynomial hash computation for BLT hash embeddings.
+    ///
+    /// Computes hash indices for all 6 tables (3 primes × 2 ngram sizes) in parallel.
+    /// Uses float arithmetic (small primes keep values in f32 exact range).
+    ///
+    /// # Arguments
+    /// * `bytes` - Input byte values as floats [batch, n_bytes]
+    /// * `n_bytes` - Sequence length
+    /// * `hash_vocab` - Hash vocabulary size (500002.0 for BLT-1B)
+    ///
+    /// # Returns
+    /// Hash indices as floats [batch, n_bytes, 6] - cast to int for embedding lookup
+    fn fused_hash_indices(
+        bytes: FloatTensor<Self>,
+        n_bytes: usize,
+        hash_vocab: f32,
     ) -> FloatTensor<Self>;
 }
 
@@ -164,5 +212,64 @@ pub fn fused_coherence<B: FusedOpsBackend>(
         entropies.into_primitive().tensor(),
         epsilon,
     );
+    Tensor::from_primitive(TensorPrimitive::Float(output))
+}
+
+/// Compute scaled dot-product attention using the fused kernel.
+/// Input shapes: [batch, n_heads, seq, head_dim]
+/// Output shape: [batch, n_heads, seq, head_dim]
+pub fn fused_attention<B: FusedOpsBackend>(
+    q: Tensor<B, 4>,
+    k: Tensor<B, 4>,
+    v: Tensor<B, 4>,
+    use_causal_mask: bool,
+) -> Tensor<B, 4> {
+    let [_, _, _, head_dim] = q.dims();
+    let output = B::fused_attention(
+        q.into_primitive().tensor(),
+        k.into_primitive().tensor(),
+        v.into_primitive().tensor(),
+        head_dim,
+        use_causal_mask,
+    );
+    Tensor::from_primitive(TensorPrimitive::Float(output))
+}
+
+/// Compute cross-attention using the fused kernel.
+/// q: [batch, n_patches, n_heads, head_dim]
+/// k, v: [batch, n_bytes, n_heads, head_dim]
+/// Output: [batch, n_patches, n_heads, head_dim]
+pub fn fused_cross_attention<B: FusedOpsBackend>(
+    q: Tensor<B, 4>,
+    k: Tensor<B, 4>,
+    v: Tensor<B, 4>,
+) -> Tensor<B, 4> {
+    let [_, _, _, head_dim] = q.dims();
+    let output = B::fused_cross_attention(
+        q.into_primitive().tensor(),
+        k.into_primitive().tensor(),
+        v.into_primitive().tensor(),
+        head_dim,
+    );
+    Tensor::from_primitive(TensorPrimitive::Float(output))
+}
+
+/// Compute rolling polynomial hash indices for BLT hash embeddings.
+///
+/// GPU-accelerates the hash computation using float arithmetic.
+/// Returns hash indices as floats (cast to int for embedding lookup).
+///
+/// # Arguments
+/// * `bytes` - Input byte values as floats [batch, n_bytes]
+/// * `hash_vocab` - Hash vocabulary size (500002.0 for BLT-1B)
+///
+/// # Returns
+/// Hash indices as floats [batch, n_bytes, 6]
+pub fn fused_hash_indices<B: FusedOpsBackend>(
+    bytes: Tensor<B, 2>,
+    hash_vocab: f32,
+) -> Tensor<B, 3> {
+    let [_batch, n_bytes] = bytes.dims();
+    let output = B::fused_hash_indices(bytes.into_primitive().tensor(), n_bytes, hash_vocab);
     Tensor::from_primitive(TensorPrimitive::Float(output))
 }

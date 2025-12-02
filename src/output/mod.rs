@@ -7,4 +7,3 @@
 pub mod webdataset;
 
 pub use webdataset::WebDatasetWriter;
-

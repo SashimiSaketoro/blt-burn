@@ -10,8 +10,8 @@ use anyhow::Result;
 use bytemuck;
 use flate2::write::GzEncoder;
 use flate2::Compression;
-use safetensors::tensor::{Dtype, TensorView};
 use safetensors::serialize;
+use safetensors::tensor::{Dtype, TensorView};
 use std::collections::HashMap;
 use std::fs::File;
 use std::path::PathBuf;
@@ -39,7 +39,7 @@ impl WebDatasetWriter {
     /// * `shard_size` - Number of samples per shard
     pub fn new(output_dir: PathBuf, shard_size: usize) -> Result<Self> {
         std::fs::create_dir_all(&output_dir)?;
-        
+
         let mut writer = Self {
             output_dir,
             shard_size,
@@ -48,14 +48,16 @@ impl WebDatasetWriter {
             total_samples: 0,
             builder: None,
         };
-        
+
         writer.start_new_shard()?;
         Ok(writer)
     }
 
     /// Start a new shard file.
     fn start_new_shard(&mut self) -> Result<()> {
-        let shard_path = self.output_dir.join(format!("shard_{:06}.tar.gz", self.current_shard_idx));
+        let shard_path = self
+            .output_dir
+            .join(format!("shard_{:06}.tar.gz", self.current_shard_idx));
         let file = File::create(&shard_path)?;
         let encoder = GzEncoder::new(file, Compression::default());
         self.builder = Some(Builder::new(encoder));
@@ -96,17 +98,18 @@ impl WebDatasetWriter {
 
         // Create SafeTensors data (before borrowing builder)
         let st_data = Self::serialize_safetensors_data(bytes, patch_lengths, entropies)?;
-        
+
         // Create JSON metadata
         let json_data = serde_json::to_vec_pretty(metadata)?;
 
         // Now borrow builder and append entries
-        let builder = self.builder.as_mut().ok_or_else(|| {
-            anyhow::anyhow!("WebDataset builder not initialized")
-        })?;
+        let builder = self
+            .builder
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("WebDataset builder not initialized"))?;
 
-        Self::append_tar_entry(builder, &format!("{}.safetensors", sample_id), &st_data)?;
-        Self::append_tar_entry(builder, &format!("{}.json", sample_id), &json_data)?;
+        Self::append_tar_entry(builder, &format!("{sample_id}.safetensors"), &st_data)?;
+        Self::append_tar_entry(builder, &format!("{sample_id}.json"), &json_data)?;
 
         self.current_sample_count += 1;
         self.total_samples += 1;
@@ -115,12 +118,16 @@ impl WebDatasetWriter {
     }
 
     /// Append a file entry to the tar archive (static method to avoid borrow issues).
-    fn append_tar_entry(builder: &mut Builder<GzEncoder<File>>, name: &str, data: &[u8]) -> Result<()> {
+    fn append_tar_entry(
+        builder: &mut Builder<GzEncoder<File>>,
+        name: &str,
+        data: &[u8],
+    ) -> Result<()> {
         let mut header = Header::new_gnu();
         header.set_size(data.len() as u64);
         header.set_mode(0o644);
         header.set_cksum();
-        
+
         builder.append_data(&mut header, name, data)?;
         Ok(())
     }
@@ -137,17 +144,25 @@ impl WebDatasetWriter {
             (
                 "bytes",
                 TensorView::new(Dtype::U8, vec![bytes.len()], bytes)
-                    .map_err(|e| anyhow::anyhow!("Failed to create bytes tensor: {}", e))?,
+                    .map_err(|e| anyhow::anyhow!("Failed to create bytes tensor: {e}"))?,
             ),
             (
                 "patch_lengths",
-                TensorView::new(Dtype::I32, vec![num_patches], bytemuck::cast_slice(patch_lengths))
-                    .map_err(|e| anyhow::anyhow!("Failed to create patch_lengths tensor: {}", e))?,
+                TensorView::new(
+                    Dtype::I32,
+                    vec![num_patches],
+                    bytemuck::cast_slice(patch_lengths),
+                )
+                .map_err(|e| anyhow::anyhow!("Failed to create patch_lengths tensor: {e}"))?,
             ),
             (
                 "entropies",
-                TensorView::new(Dtype::F32, vec![entropies.len()], bytemuck::cast_slice(entropies))
-                    .map_err(|e| anyhow::anyhow!("Failed to create entropies tensor: {}", e))?,
+                TensorView::new(
+                    Dtype::F32,
+                    vec![entropies.len()],
+                    bytemuck::cast_slice(entropies),
+                )
+                .map_err(|e| anyhow::anyhow!("Failed to create entropies tensor: {e}"))?,
             ),
         ];
 
@@ -197,7 +212,7 @@ mod tests {
             });
             writer
                 .add_sample(
-                    &format!("{:06}", i),
+                    &format!("{i:06}"),
                     b"test bytes",
                     &[5, 5],
                     &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0],
@@ -215,4 +230,3 @@ mod tests {
         assert!(temp_dir.path().join("shard_000001.tar.gz").exists());
     }
 }
-

@@ -26,7 +26,7 @@ impl TextPreTokenizer {
     /// Load a tokenizer from a file path.
     pub fn from_file(path: &str) -> Result<Self> {
         let tokenizer = HFTokenizer::from_file(path)
-            .map_err(|e| anyhow::anyhow!("Failed to load tokenizer: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to load tokenizer: {e}"))?;
         Ok(Self { tokenizer })
     }
 
@@ -45,7 +45,7 @@ impl ModalityPreTokenizer for TextPreTokenizer {
         let encoding = self
             .tokenizer
             .encode(text.as_ref(), false)
-            .map_err(|e| anyhow::anyhow!("Encoding error: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Encoding error: {e}"))?;
         let tokens = encoding.get_tokens();
         let offsets = encoding.get_offsets();
 
@@ -76,7 +76,7 @@ impl ModalityPreTokenizer for TextPreTokenizer {
         Ok(segments)
     }
 
-    fn modality(&self) -> &str {
+    fn modality(&self) -> &'static str {
         "text"
     }
 }
@@ -122,7 +122,7 @@ impl ModalityPreTokenizer for RawTextPreTokenizer {
         Ok(segments)
     }
 
-    fn modality(&self) -> &str {
+    fn modality(&self) -> &'static str {
         "text_raw"
     }
 }
@@ -153,4 +153,3 @@ mod tests {
         assert_eq!(segments[0].bytes.len(), 3);
     }
 }
-

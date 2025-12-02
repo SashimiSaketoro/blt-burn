@@ -11,11 +11,10 @@ use std::path::Path;
 use crate::blt_core::{process_bytes_with_embeddings, BltConfig, BltExampleWithEmbeddings};
 use crate::dataset_helpers::{create_processor, ModalitySegment, SegmentContent};
 use crate::hf_resolver::{HfResolver, HfResolverConfig, ZERO_IMAGE_SIZE};
-use crate::model::LMTransformer;
 use crate::modalities::{ByteSegment, SegmentMetadata};
+use crate::model::LMTransformer;
 use crate::polars_dataset_loader;
 use crate::sidecar::{EdgeData, HypergraphBuilder, HypergraphSidecar, NodeData};
-use crate::tokenizer::BltTokenizer;
 
 /// Process a Hugging Face dataset through the BLT entropy model.
 ///
@@ -29,12 +28,11 @@ pub fn process_hf_dataset(
     output_dir: &Path,
     model: &LMTransformer<Wgpu>,
     device: &WgpuDevice,
-    _tokenizer: &BltTokenizer,
     threshold: f64,
     subset: Option<&str>,
     limit: Option<usize>,
 ) -> Result<()> {
-    println!("🤗 Loading dataset from Hugging Face: {}", dataset_name);
+    println!("🤗 Loading dataset from Hugging Face: {dataset_name}");
 
     // Create output directory
     std::fs::create_dir_all(output_dir)?;
@@ -55,7 +53,7 @@ pub fn process_hf_dataset(
 
     let num_entries = df.height();
     let process_limit = limit.unwrap_or(num_entries).min(num_entries);
-    println!("Processing {} of {} entries...", process_limit, num_entries);
+    println!("Processing {process_limit} of {num_entries} entries...");
 
     // Create cache directory for downloads
     let cache_dir = output_dir.join(".cache");
@@ -78,9 +76,9 @@ pub fn process_hf_dataset(
     for row_idx in 0..process_limit {
         println!("\nProcessing entry {}/{}...", row_idx + 1, process_limit);
 
-        let task_id = infer_task_id(&df, row_idx).unwrap_or_else(|| format!("item_{}", row_idx));
+        let task_id = infer_task_id(&df, row_idx).unwrap_or_else(|| format!("item_{row_idx}"));
 
-        println!("Processing: {}", task_id);
+        println!("Processing: {task_id}");
 
         // Step 1: Download any referenced files FIRST (before processing)
         let downloaded = processor.download_references(&df, row_idx, &cache_dir)?;
@@ -108,42 +106,32 @@ pub fn process_hf_dataset(
             continue;
         }
 
-        println!("  Running BLT inference on {} bytes...", total_bytes);
+        println!("  Running BLT inference on {total_bytes} bytes...");
 
         // Step 5: Process through BLT model
-        let blt_result = process_bytes_with_embeddings(
-            &all_bytes,
-            &task_id,
-            model,
-            device,
-            &blt_config,
-        );
+        let blt_result =
+            process_bytes_with_embeddings(&all_bytes, &task_id, model, device, &blt_config);
 
         let total_tokens = blt_result.core.tokens.len();
         let num_patches = blt_result.core.patch_lengths.len();
 
         println!(
-            "  Processed: {} tokens, {} patches",
-            total_tokens, num_patches
+            "  Processed: {total_tokens} tokens, {num_patches} patches"
         );
 
         // Update hypergraph trunk with actual byte count
         update_trunk_bytes(&mut hypergraph, total_bytes);
 
         // Inject coherence scores into leaf metadata
-        inject_coherence_into_leaves(
-            &mut hypergraph,
-            &blt_result.coherence_scores,
-            total_tokens,
-        );
+        inject_coherence_into_leaves(&mut hypergraph, &blt_result.coherence_scores, total_tokens);
 
         // Step 6: Save hypergraph sidecar
-        let metadata_path = output_dir.join(format!("{}.hypergraph.db", task_id));
+        let metadata_path = output_dir.join(format!("{task_id}.hypergraph.db"));
         hypergraph.save_to_sqlite(&metadata_path)?;
         println!("  Saved hypergraph: {}", metadata_path.display());
 
         // Step 7: Save SafeTensors with all BLT outputs
-        let safetensors_path = output_dir.join(format!("{}.safetensors", task_id));
+        let safetensors_path = output_dir.join(format!("{task_id}.safetensors"));
         save_blt_safetensors(&safetensors_path, &blt_result, &task_id)?;
         println!("  Saved: {}", safetensors_path.display());
     }
@@ -169,7 +157,12 @@ fn save_blt_safetensors(
     let tokens_i32: Vec<i32> = result.core.tokens.clone();
 
     // Convert mask to i32 (1 = attend, 0 = ignore)
-    let mask_i32: Vec<i32> = result.core.mask.iter().map(|&b| if b { 1 } else { 0 }).collect();
+    let mask_i32: Vec<i32> = result
+        .core
+        .mask
+        .iter()
+        .map(|&b| if b { 1 } else { 0 })
+        .collect();
 
     let tensors: Vec<(&str, TensorView)> = vec![
         (
@@ -243,7 +236,7 @@ fn save_blt_safetensors(
     metadata_map.insert("embedding_dim".to_string(), embedding_dim.to_string());
     metadata_map.insert(
         "metadata_file".to_string(),
-        format!("{}.hypergraph.db", task_id),
+        format!("{task_id}.hypergraph.db"),
     );
 
     let serialized = serialize(tensors, &Some(metadata_map))?;
@@ -256,7 +249,11 @@ fn save_blt_safetensors(
 /// Update the trunk node's total_bytes field in the hypergraph.
 fn update_trunk_bytes(hypergraph: &mut HypergraphSidecar, total_bytes: usize) {
     for node in &mut hypergraph.nodes {
-        if let NodeData::Trunk { total_bytes: ref mut tb, .. } = node {
+        if let NodeData::Trunk {
+            total_bytes: ref mut tb,
+            ..
+        } = node
+        {
             *tb = total_bytes;
             break;
         }
@@ -275,13 +272,12 @@ fn inject_coherence_into_leaves(
             if let Some(ref mut meta) = segment.metadata {
                 let start = meta.start_offset.min(total_tokens);
                 let end = meta.end_offset.min(total_tokens);
-                
+
                 if start < end && end <= coherence_scores.len() {
                     // Calculate mean coherence for this segment
-                    let segment_coherence: f32 = coherence_scores[start..end]
-                        .iter()
-                        .sum::<f32>() / ((end - start).max(1) as f32);
-                    
+                    let segment_coherence: f32 = coherence_scores[start..end].iter().sum::<f32>()
+                        / ((end - start).max(1) as f32);
+
                     // Inject into metadata.extra
                     let mut extra = meta.extra.take().unwrap_or(serde_json::json!({}));
                     if let Some(obj) = extra.as_object_mut() {
@@ -310,7 +306,7 @@ fn convert_to_byte_segments(
 
     // Create trunk node
     let trunk_idx = builder.add_node(NodeData::Trunk {
-        source_hash: format!("{}:{}", dataset_name, task_id),
+        source_hash: format!("{dataset_name}:{task_id}"),
         total_bytes: 0, // Will be updated
     });
 
@@ -322,13 +318,13 @@ fn convert_to_byte_segments(
         let modality_key = format!("{:?}", segment.modality_type);
         modality_groups
             .entry(modality_key)
-            .or_insert_with(Vec::new)
+            .or_default()
             .push((idx, segment));
     }
 
     // Process each modality group
     let dataset_slug = dataset_name.replace('/', "_");
-    
+
     // Track previous leaf for sequence edges
     let mut prev_leaf_idx: Option<hypergraph::VertexIndex> = None;
     let mut global_byte_offset = 0usize;
@@ -369,7 +365,7 @@ fn convert_to_byte_segments(
                             if dataset_path.exists() {
                                 dataset_path
                             } else {
-                                let filename = path.split('/').last().unwrap_or(&path);
+                                let filename = path.split('/').next_back().unwrap_or(&path);
                                 cache_dir.join(filename)
                             }
                         }
@@ -387,7 +383,7 @@ fn convert_to_byte_segments(
                             Some(bytes) => bytes,
                             None => {
                                 // Skip this segment if resolver returns None (skip_missing mode)
-                                println!("    Skipping missing file: {}", path);
+                                println!("    Skipping missing file: {path}");
                                 continue;
                             }
                         }
@@ -407,17 +403,17 @@ fn convert_to_byte_segments(
                         match resolver.resolve(path, is_image)? {
                             Some(bytes) => bytes,
                             None => {
-                                println!("    Skipping missing URL: {}", url);
+                                println!("    Skipping missing URL: {url}");
                                 continue;
                             }
                         }
                     } else {
                         // Non-HF URLs: use placeholder (could add reqwest download later)
-                        println!("    Warning: Non-HF URL not downloaded: {}", url);
+                        println!("    Warning: Non-HF URL not downloaded: {url}");
                         if HfResolver::is_image_path(&url) {
                             vec![0u8; ZERO_IMAGE_SIZE]
                         } else {
-                            format!("[URL: {}]", url).into_bytes()
+                            format!("[URL: {url}]").into_bytes()
                         }
                     }
                 }
@@ -429,7 +425,7 @@ fn convert_to_byte_segments(
 
             let byte_segment = ByteSegment {
                 bytes: bytes.clone(),
-                label: Some(format!("{}_{}_{}", modality_name, idx, task_id)),
+                label: Some(format!("{modality_name}_{idx}_{task_id}")),
                 metadata: Some(SegmentMetadata {
                     start_offset,
                     end_offset,

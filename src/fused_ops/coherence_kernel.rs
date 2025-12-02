@@ -83,7 +83,7 @@ pub fn fused_embedding_coherence_kernel<F: Float>(
     let mut sum_sq = F::new(0.0);
     for i in 0..dim {
         let val = embeddings[row_start + i];
-        sum_sq = sum_sq + val * val;
+        sum_sq += val * val;
     }
 
     // Get entropy and compute coherence
@@ -93,4 +93,3 @@ pub fn fused_embedding_coherence_kernel<F: Float>(
     let denom = entropy + eps;
     output[out_idx] = sum_sq / denom;
 }
-

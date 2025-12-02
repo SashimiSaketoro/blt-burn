@@ -36,6 +36,7 @@ pub mod code;
 pub mod document;
 pub mod image;
 pub mod text;
+#[cfg(feature = "video")]
 pub mod video;
 
 use anyhow::Result;
@@ -51,7 +52,7 @@ pub trait ModalityPreTokenizer: Send + Sync {
     fn pre_tokenize(&self, data: &[u8]) -> Result<Vec<ByteSegment>>;
 
     /// Get the modality name for logging/debugging.
-    fn modality(&self) -> &str;
+    fn modality(&self) -> &'static str;
 
     /// Whether this modality supports multi-view extraction.
     ///
@@ -116,22 +117,17 @@ pub struct SegmentMetadata {
 }
 
 /// Configuration for PDF processing modes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PdfMode {
     /// Extract only raw PDF bytes (for structural learning).
     RawOnly,
     /// Extract only text content (default, most efficient).
+    #[default]
     TextOnly,
     /// Render pages as images (for layout-aware processing).
     ImageOnly,
     /// Full multi-view: raw + text + images.
     MultiView,
-}
-
-impl Default for PdfMode {
-    fn default() -> Self {
-        PdfMode::TextOnly
-    }
 }
 
 impl std::str::FromStr for PdfMode {
@@ -144,8 +140,7 @@ impl std::str::FromStr for PdfMode {
             "image_only" | "image" => Ok(PdfMode::ImageOnly),
             "multiview" | "multi_view" | "all" => Ok(PdfMode::MultiView),
             _ => Err(format!(
-                "Unknown PDF mode: {}. Expected: raw_only, text_only, image_only, or multiview",
-                s
+                "Unknown PDF mode: {s}. Expected: raw_only, text_only, image_only, or multiview"
             )),
         }
     }
@@ -254,9 +249,9 @@ impl PreTokenizerType {
             PreTokenizerType::TextFromFile { path } => {
                 Ok(Box::new(text::TextPreTokenizer::from_file(path)?))
             }
-            PreTokenizerType::Image { patch_size, stride } => {
-                Ok(Box::new(image::ImagePreTokenizer::new(*patch_size, *stride)))
-            }
+            PreTokenizerType::Image { patch_size, stride } => Ok(Box::new(
+                image::ImagePreTokenizer::new(*patch_size, *stride),
+            )),
             PreTokenizerType::Audio {
                 frame_size,
                 sample_rate,
@@ -268,8 +263,13 @@ impl PreTokenizerType {
                 Ok(Box::new(code::CodePreTokenizer::new(language.clone())))
             }
             PreTokenizerType::Pdf { mode } => Ok(Box::new(document::PdfPreTokenizer::new(*mode))),
+            #[cfg(feature = "video")]
             PreTokenizerType::Video { frame_rate } => {
                 Ok(Box::new(video::VideoPreTokenizer::new(*frame_rate)))
+            }
+            #[cfg(not(feature = "video"))]
+            PreTokenizerType::Video { .. } => {
+                Err(anyhow::anyhow!("Video support requires --features video"))
             }
             PreTokenizerType::Binary => Ok(Box::new(binary::BinaryPreTokenizer)),
         }
@@ -283,5 +283,5 @@ pub use code::CodePreTokenizer;
 pub use document::PdfPreTokenizer;
 pub use image::ImagePreTokenizer;
 pub use text::{RawTextPreTokenizer, TextPreTokenizer};
+#[cfg(feature = "video")]
 pub use video::VideoPreTokenizer;
-

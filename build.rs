@@ -10,19 +10,19 @@ fn check_ffmpeg_dev() {
     #[cfg(target_os = "macos")]
     {
         let homebrew_prefixes = [
-            "/opt/homebrew",           // Apple Silicon
-            "/usr/local",              // Intel Mac
+            "/opt/homebrew", // Apple Silicon
+            "/usr/local",    // Intel Mac
         ];
-        
+
         let mut ffmpeg_found = false;
         for prefix in &homebrew_prefixes {
             let ffmpeg_dir = format!("{}/opt/ffmpeg", prefix);
             let ffmpeg_include = format!("{}/include", ffmpeg_dir);
-            
+
             if std::path::Path::new(&ffmpeg_include).exists() {
                 ffmpeg_found = true;
                 println!("cargo:warning=✅ Found FFmpeg at: {}", ffmpeg_dir);
-                
+
                 // Check if FFMPEG_DIR is set
                 if std::env::var("FFMPEG_DIR").is_err() {
                     println!("cargo:warning=");
@@ -37,7 +37,7 @@ fn check_ffmpeg_dev() {
                 break;
             }
         }
-        
+
         if !ffmpeg_found {
             println!("cargo:warning=❌ FFmpeg not found in Homebrew locations");
             println!("cargo:warning=Install with: brew install ffmpeg pkg-config");
@@ -55,14 +55,12 @@ fn check_ffmpeg_dev() {
         }
         _ => {
             // pkg-config failed, try to check if ffmpeg binary exists at least
-            let ffmpeg_check = Command::new("ffmpeg")
-                .arg("-version")
-                .output();
+            let ffmpeg_check = Command::new("ffmpeg").arg("-version").output();
 
             match ffmpeg_check {
                 Ok(output) if output.status.success() => {
                     println!("cargo:warning=⚠️  FFmpeg binary found, but pkg-config cannot find dev headers");
-                    
+
                     #[cfg(target_os = "macos")]
                     {
                         println!("cargo:warning=On macOS, try setting environment variables:");
@@ -70,7 +68,7 @@ fn check_ffmpeg_dev() {
                         println!("cargo:warning=  export FFMPEG_DIR=\"$(brew --prefix ffmpeg)\"");
                         println!("cargo:warning=Or reinstall: brew reinstall ffmpeg pkg-config");
                     }
-                    
+
                     #[cfg(target_os = "linux")]
                     {
                         println!("cargo:warning=Install FFmpeg development headers:");
@@ -80,26 +78,32 @@ fn check_ffmpeg_dev() {
                     }
                 }
                 _ => {
-                    println!("cargo:warning=❌ FFmpeg NOT FOUND - video feature will fail to compile!");
+                    println!(
+                        "cargo:warning=❌ FFmpeg NOT FOUND - video feature will fail to compile!"
+                    );
                     println!("cargo:warning=Install FFmpeg with development headers:");
-                    
+
                     #[cfg(target_os = "macos")]
                     println!("cargo:warning=  brew install ffmpeg pkg-config");
-                    
+
                     #[cfg(target_os = "linux")]
                     {
                         println!("cargo:warning=  Ubuntu/Debian: sudo apt install ffmpeg libavcodec-dev libavformat-dev libswscale-dev libavutil-dev pkg-config");
                         println!("cargo:warning=  Fedora: sudo dnf install ffmpeg ffmpeg-devel");
                         println!("cargo:warning=  Arch: sudo pacman -S ffmpeg");
                     }
-                    
+
                     #[cfg(target_os = "windows")]
                     {
-                        println!("cargo:warning=  Download from: https://www.gyan.dev/ffmpeg/builds/");
+                        println!(
+                            "cargo:warning=  Download from: https://www.gyan.dev/ffmpeg/builds/"
+                        );
                         println!("cargo:warning=  Extract and set FFMPEG_DIR environment variable");
                     }
-                    
-                    println!("cargo:warning=Or disable video feature: cargo build --no-default-features");
+
+                    println!(
+                        "cargo:warning=Or disable video feature: cargo build --no-default-features"
+                    );
                 }
             }
         }
@@ -113,7 +117,7 @@ fn find_project_venv() -> Option<PathBuf> {
     if venv.exists() {
         return Some(venv);
     }
-    
+
     // Try one level up
     if let Some(parent) = current.parent() {
         let venv = parent.join(".venv");
@@ -121,16 +125,16 @@ fn find_project_venv() -> Option<PathBuf> {
             return Some(venv);
         }
     }
-    
+
     None
 }
 
 fn find_hf_cache_model() -> Option<PathBuf> {
     // Look for the original Facebook BLT entropy model in HF cache
     let home = std::env::var("HOME").ok()?;
-    let cache_path = PathBuf::from(home)
-        .join(".cache/huggingface/hub/models--facebook--blt-entropy/snapshots");
-    
+    let cache_path =
+        PathBuf::from(home).join(".cache/huggingface/hub/models--facebook--blt-entropy/snapshots");
+
     if cache_path.exists() {
         // Find the first snapshot directory
         if let Ok(entries) = std::fs::read_dir(&cache_path) {
@@ -160,13 +164,16 @@ fn main() -> Result<()> {
     if let Some(venv) = find_project_venv() {
         let venv_bin = venv.join("bin");
         let venv_python = venv_bin.join("python3");
-        
+
         if venv_python.exists() {
             println!("cargo:warning=Found project .venv at: {}", venv.display());
             println!("cargo:rustc-env=BLT_PYTHON_VENV_BIN={}", venv_bin.display());
             println!("cargo:rustc-env=BLT_PYTHON_PATH={}", venv_python.display());
         } else {
-            println!("cargo:warning=Found .venv but python3 not found at: {}", venv_python.display());
+            println!(
+                "cargo:warning=Found .venv but python3 not found at: {}",
+                venv_python.display()
+            );
         }
     } else {
         println!("cargo:warning=No project .venv found, burn-dataset will use system Python or create its own venv");
@@ -174,8 +181,14 @@ fn main() -> Result<()> {
 
     // 2. First check for original Facebook model in HF cache (preferred - has correct weights)
     if let Some(safetensors_path) = find_hf_cache_model() {
-        println!("cargo:warning=Found original Facebook BLT entropy model at: {}", safetensors_path.display());
-        println!("cargo:rustc-env=BLT_MODEL_SAFETENSORS_PATH={}", safetensors_path.display());
+        println!(
+            "cargo:warning=Found original Facebook BLT entropy model at: {}",
+            safetensors_path.display()
+        );
+        println!(
+            "cargo:rustc-env=BLT_MODEL_SAFETENSORS_PATH={}",
+            safetensors_path.display()
+        );
         println!("cargo:rustc-env=BLT_MODEL_FORMAT=safetensors");
         return Ok(());
     }
@@ -185,8 +198,7 @@ fn main() -> Result<()> {
     let filename = "model.safetensors";
 
     println!(
-        "cargo:warning=Checking/Downloading model {} from {}...",
-        filename, repo_id
+        "cargo:warning=Checking/Downloading model {filename} from {repo_id}..."
     );
 
     let api = Api::new()?;
@@ -194,12 +206,15 @@ fn main() -> Result<()> {
 
     match repo.get(filename) {
         Ok(path) => {
-            println!("cargo:warning=Model available at: {:?}", path);
-            println!("cargo:rustc-env=BLT_MODEL_SAFETENSORS_PATH={}", path.display());
+            println!("cargo:warning=Model available at: {}", path.display());
+            println!(
+                "cargo:rustc-env=BLT_MODEL_SAFETENSORS_PATH={}",
+                path.display()
+            );
             println!("cargo:rustc-env=BLT_MODEL_FORMAT=safetensors");
         }
         Err(e) => {
-            println!("cargo:warning=Could not download model: {}. Will need to provide model path at runtime.", e);
+            println!("cargo:warning=Could not download model: {e}. Will need to provide model path at runtime.");
         }
     }
 

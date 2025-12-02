@@ -197,7 +197,7 @@ impl ModalityPreTokenizer for VideoPreTokenizer {
         self.extract_with_ffmpeg(data)
     }
 
-    fn modality(&self) -> &str {
+    fn modality(&self) -> &'static str {
         "video"
     }
 }
@@ -210,7 +210,7 @@ impl ModalityPreTokenizer for VideoPreTokenizer {
         )
     }
 
-    fn modality(&self) -> &str {
+    fn modality(&self) -> &'static str {
         "video"
     }
 }
@@ -249,11 +249,12 @@ mod tests {
         assert!(result.is_err());
     }
 
+    #[cfg(feature = "video")]
     #[test]
     fn test_rgb_frame_size() {
         // Verify expected RGB24 frame size: 224 * 224 * 3 = 150528 bytes
-        let expected_size = (TARGET_WIDTH as usize) * (TARGET_HEIGHT as usize) * RGB_BYTES_PER_PIXEL;
+        let expected_size =
+            (TARGET_WIDTH as usize) * (TARGET_HEIGHT as usize) * RGB_BYTES_PER_PIXEL;
         assert_eq!(expected_size, 150528);
     }
 }
-

@@ -71,8 +71,7 @@ fn find_dataset_file_recursively(dir: &Path, split: &str, extension: &str) -> Op
         } else if path
             .extension()
             .and_then(|s| s.to_str())
-            .map(|ext| ext.eq_ignore_ascii_case(extension))
-            .unwrap_or(false)
+            .is_some_and(|ext| ext.eq_ignore_ascii_case(extension))
         {
             let filename = path.file_name()?.to_string_lossy().to_lowercase();
             if filename.contains(&split.to_lowercase()) {
@@ -102,7 +101,7 @@ fn find_named_file_recursively(dir: &Path, target: &str) -> Option<PathBuf> {
 pub fn find_dataset_file(dataset_name: &str, split: &str, extension: &str) -> Result<PathBuf> {
     let dataset_cache = dataset_cache_dir(dataset_name)?;
     find_dataset_file_recursively(&dataset_cache, split, extension).ok_or_else(|| {
-        ArrowError::FileNotFound(dataset_cache.join(format!("*.{}", extension))).into()
+        ArrowError::FileNotFound(dataset_cache.join(format!("*.{extension}"))).into()
     })
 }
 
@@ -129,9 +128,9 @@ impl ArrowReader {
     /// Open an Arrow file for reading using Polars
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
         let df = LazyFrame::scan_ipc(path.as_ref(), ScanArgsIpc::default())
-            .map_err(|e| ArrowError::ReadError(format!("Failed to scan IPC file: {}", e)))?
+            .map_err(|e| ArrowError::ReadError(format!("Failed to scan IPC file: {e}")))?
             .collect()
-            .map_err(|e| ArrowError::ReadError(format!("Failed to collect DataFrame: {}", e)))?;
+            .map_err(|e| ArrowError::ReadError(format!("Failed to collect DataFrame: {e}")))?;
 
         Ok(Self { df })
     }
@@ -171,7 +170,7 @@ impl ArrowReader {
                     .str()
                     .map_err(|e| ArrowError::ReadError(e.to_string()))?
                     .get(row_idx)
-                    .ok_or_else(|| ArrowError::RowOutOfBounds(row_idx))?;
+                    .ok_or(ArrowError::RowOutOfBounds(row_idx))?;
                 Ok(value.as_bytes().to_vec())
             }
             DataType::Binary => {
@@ -179,7 +178,7 @@ impl ArrowReader {
                     .binary()
                     .map_err(|e| ArrowError::ReadError(e.to_string()))?
                     .get(row_idx)
-                    .ok_or_else(|| ArrowError::RowOutOfBounds(row_idx))?;
+                    .ok_or(ArrowError::RowOutOfBounds(row_idx))?;
                 Ok(value.to_vec())
             }
             DataType::List(_) => {
@@ -193,7 +192,7 @@ impl ArrowReader {
                 let value = series
                     .get(row_idx)
                     .map_err(|e| ArrowError::ReadError(e.to_string()))?;
-                let string_repr = format!("{:?}", value);
+                let string_repr = format!("{value:?}");
                 Ok(string_repr.into_bytes())
             }
         }
@@ -224,7 +223,7 @@ impl ArrowReader {
                     .binary()
                     .map_err(|e| ArrowError::ReadError(e.to_string()))?
                     .get(row_idx)
-                    .ok_or_else(|| ArrowError::RowOutOfBounds(row_idx))?;
+                    .ok_or(ArrowError::RowOutOfBounds(row_idx))?;
                 return Ok(vec![ImageData::Bytes(bytes.to_vec())]);
             }
             DataType::String => {
@@ -232,7 +231,7 @@ impl ArrowReader {
                     .str()
                     .map_err(|e| ArrowError::ReadError(e.to_string()))?
                     .get(row_idx)
-                    .ok_or_else(|| ArrowError::RowOutOfBounds(row_idx))?;
+                    .ok_or(ArrowError::RowOutOfBounds(row_idx))?;
 
                 if let Ok(paths) = serde_json::from_str::<Vec<String>>(value) {
                     return Ok(paths.into_iter().map(ImageData::Path).collect());
@@ -263,7 +262,7 @@ fn extract_list_series(column: &polars::frame::column::Column, row_idx: usize) -
         .map_err(|e| ArrowError::ReadError(e.to_string()))?;
     let list_series = list_chunked
         .get_as_series(row_idx)
-        .ok_or_else(|| ArrowError::RowOutOfBounds(row_idx))?;
+        .ok_or(ArrowError::RowOutOfBounds(row_idx))?;
 
     flatten_list_series(list_series)
 }
@@ -406,8 +405,7 @@ fn struct_row_to_json(fields: &[Series], idx: usize) -> Result<serde_json::Value
                 .str()
                 .map_err(|e| ArrowError::ReadError(e.to_string()))?
                 .get(idx)
-                .map(|s| serde_json::Value::String(s.to_string()))
-                .unwrap_or(serde_json::Value::Null),
+                .map_or(serde_json::Value::Null, |s| serde_json::Value::String(s.to_string())),
             DataType::Binary => {
                 if let Some(bytes) = field
                     .binary()
@@ -425,30 +423,25 @@ fn struct_row_to_json(fields: &[Series], idx: usize) -> Result<serde_json::Value
                 .i64()
                 .map_err(|e| ArrowError::ReadError(e.to_string()))?
                 .get(idx)
-                .map(|v| serde_json::Value::Number(v.into()))
-                .unwrap_or(serde_json::Value::Null),
+                .map_or(serde_json::Value::Null, |v| serde_json::Value::Number(v.into())),
             DataType::Float64 => field
                 .f64()
                 .map_err(|e| ArrowError::ReadError(e.to_string()))?
                 .get(idx)
-                .and_then(|v| serde_json::Number::from_f64(v))
-                .map(serde_json::Value::Number)
-                .unwrap_or(serde_json::Value::Null),
+                .and_then(serde_json::Number::from_f64)
+                .map_or(serde_json::Value::Null, serde_json::Value::Number),
             DataType::Boolean => field
                 .bool()
                 .map_err(|e| ArrowError::ReadError(e.to_string()))?
                 .get(idx)
-                .map(serde_json::Value::Bool)
-                .unwrap_or(serde_json::Value::Null),
+                .map_or(serde_json::Value::Null, serde_json::Value::Bool),
             DataType::Struct(_) | DataType::List(_) => field
                 .get(idx)
-                .map(|v| serde_json::Value::String(format!("{:?}", v)))
+                .map(|v| serde_json::Value::String(format!("{v:?}")))
                 .map_err(|e| ArrowError::ReadError(e.to_string()))?,
             _ => serde_json::Value::String(
                 field
-                    .get(idx)
-                    .map(|v| format!("{:?}", v))
-                    .unwrap_or_else(|_| "null".to_string()),
+                    .get(idx).map_or_else(|_| "null".to_string(), |v| format!("{v:?}")),
             ),
         };
 
@@ -487,8 +480,7 @@ fn list_to_json(list_value: &Series) -> Result<serde_json::Value> {
                         use base64::{engine::general_purpose, Engine as _};
                         let encoded = general_purpose::STANDARD.encode(bytes);
                         values.push(serde_json::Value::String(format!(
-                            "data:image/png;base64,{}",
-                            encoded
+                            "data:image/png;base64,{encoded}"
                         )));
                     }
                 }
@@ -500,7 +492,7 @@ fn list_to_json(list_value: &Series) -> Result<serde_json::Value> {
                 let value = list_value
                     .get(i)
                     .map_err(|e| ArrowError::ReadError(e.to_string()))?;
-                values.push(serde_json::Value::String(format!("{:?}", value)));
+                values.push(serde_json::Value::String(format!("{value:?}")));
             }
         }
     }
@@ -541,7 +533,7 @@ impl ImageData {
                 // Try to read from local file system first
                 if Path::new(path).exists() {
                     return std::fs::read(path)
-                        .map_err(|e| anyhow::anyhow!("Failed to read image: {}", e));
+                        .map_err(|e| anyhow::anyhow!("Failed to read image: {e}"));
                 }
 
                 // Try HfResolver if provided
@@ -557,10 +549,7 @@ impl ImageData {
 
                 // Fallback: return zero tensor instead of error
                 // This preserves tensor shape without semantic noise
-                eprintln!(
-                    "Warning: Image path not found, using zero tensor: {}",
-                    path
-                );
+                eprintln!("Warning: Image path not found, using zero tensor: {path}");
                 Ok(vec![0u8; ZERO_IMAGE_SIZE])
             }
             ImageData::Bytes(bytes) => Ok(bytes.clone()),

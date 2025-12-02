@@ -61,14 +61,18 @@ pub fn get_api() -> Result<&'static Api> {
         Ok(api) => {
             // Try to set the API, but another thread might have beaten us
             let _ = HF_API.set(api);
-            HF_API.get().ok_or_else(|| anyhow::anyhow!("Failed to initialize HuggingFace API"))
+            HF_API
+                .get()
+                .ok_or_else(|| anyhow::anyhow!("Failed to initialize HuggingFace API"))
         }
-        Err(e) => Err(anyhow::anyhow!("Failed to initialize HuggingFace API: {}", e)),
+        Err(e) => Err(anyhow::anyhow!(
+            "Failed to initialize HuggingFace API: {e}"
+        )),
     }
 }
 
 fn get_http_client() -> &'static Client {
-    HTTP_CLIENT.get_or_init(|| Client::new())
+    HTTP_CLIENT.get_or_init(Client::new)
 }
 
 /// Parsed representation of an hf:// URI
@@ -94,7 +98,7 @@ pub fn parse_hf_uri(uri: &str) -> Option<ParsedHfUri> {
     let owner = parts.next()?;
     let dataset_part = parts.next()?;
     let path = parts.next().unwrap_or("").to_string();
-    
+
     if path.is_empty() {
         return None;
     }
@@ -109,7 +113,7 @@ pub fn parse_hf_uri(uri: &str) -> Option<ParsedHfUri> {
     };
 
     Some(ParsedHfUri {
-        repo_id: format!("{}/{}", owner, dataset_name),
+        repo_id: format!("{owner}/{dataset_name}"),
         revision,
         path,
     })
@@ -145,7 +149,7 @@ pub fn looks_like_url(value: &str) -> bool {
 
 /// Extract a filename from a URL, falling back to a hash if needed
 pub fn filename_from_url(url: &str) -> String {
-    if let Some(filename) = url.split('/').last() {
+    if let Some(filename) = url.split('/').next_back() {
         if !filename.is_empty() && filename.contains('.') {
             return filename.to_string();
         }
@@ -217,8 +221,8 @@ impl HfResolver {
         // Ensure cache directory exists
         if let Err(e) = std::fs::create_dir_all(&config.cache_dir) {
             eprintln!(
-                "Warning: Could not create cache dir {:?}: {}",
-                config.cache_dir, e
+                "Warning: Could not create cache dir {}: {e}",
+                config.cache_dir.display()
             );
         }
         Self { config }
@@ -249,7 +253,7 @@ impl HfResolver {
         let local_path = self.local_cache_path(path);
         if local_path.exists() {
             let bytes = std::fs::read(&local_path)
-                .with_context(|| format!("Failed to read cached file: {:?}", local_path))?;
+                .with_context(|| format!("Failed to read cached file: {local_path:?}"))?;
             return Ok(Some(bytes));
         }
 
@@ -258,15 +262,14 @@ impl HfResolver {
             Ok(bytes) => Ok(Some(bytes)),
             Err(e) => {
                 if self.config.skip_missing {
-                    eprintln!("Skipping missing file: {} ({})", path, e);
+                    eprintln!("Skipping missing file: {path} ({e})");
                     return Ok(None);
                 }
 
                 if is_image {
                     // Zero tensor fallback for images (preserves shape without semantic noise)
                     eprintln!(
-                        "Warning: Could not resolve {}, using zero tensor ({}x{}x{})",
-                        path, DEFAULT_IMAGE_WIDTH, DEFAULT_IMAGE_HEIGHT, DEFAULT_IMAGE_CHANNELS
+                        "Warning: Could not resolve {path}, using zero tensor ({DEFAULT_IMAGE_WIDTH}x{DEFAULT_IMAGE_HEIGHT}x{DEFAULT_IMAGE_CHANNELS})"
                     );
                     Ok(Some(vec![0u8; ZERO_IMAGE_SIZE]))
                 } else {
@@ -323,27 +326,24 @@ impl HfResolver {
 
         let repo = api.repo(Repo::new(
             self.config.repo_slug.clone(),
-            self.config.repo_type.clone(),
+            self.config.repo_type,
         ));
 
         // Try to get the file
         let downloaded_path = repo.get(path).with_context(|| {
-            format!(
-                "Failed to download {} from {}",
-                path, self.config.repo_slug
-            )
+            format!("Failed to download {} from {}", path, self.config.repo_slug)
         })?;
 
         // Read the downloaded content
         let bytes = std::fs::read(&downloaded_path)
-            .with_context(|| format!("Failed to read downloaded file: {:?}", downloaded_path))?;
+            .with_context(|| format!("Failed to read downloaded file: {downloaded_path:?}"))?;
 
         // Cache locally for future use
         if let Some(parent) = local_path.parent() {
             std::fs::create_dir_all(parent).ok();
         }
         if let Err(e) = std::fs::write(local_path, &bytes) {
-            eprintln!("Warning: Could not cache file {:?}: {}", local_path, e);
+            eprintln!("Warning: Could not cache file {}: {e}", local_path.display());
         }
 
         Ok(bytes)
@@ -368,7 +368,7 @@ impl HfResolver {
                 if self.config.skip_missing {
                     return Ok(None);
                 }
-                return Err(anyhow::anyhow!("Invalid HF URI format: {}", uri));
+                return Err(anyhow::anyhow!("Invalid HF URI format: {uri}"));
             }
         };
 
@@ -378,19 +378,21 @@ impl HfResolver {
         }
 
         // Check local cache first
-        let local_path = self.config.cache_dir
+        let local_path = self
+            .config
+            .cache_dir
             .join(parsed.repo_id.replace('/', "_"))
             .join(&sanitized);
-        
+
         if local_path.exists() {
             let bytes = std::fs::read(&local_path)
-                .with_context(|| format!("Failed to read cached file: {:?}", local_path))?;
+                .with_context(|| format!("Failed to read cached file: {local_path:?}"))?;
             return Ok(Some(bytes));
         }
 
         // Try to download from HuggingFace with revision support
         let api = get_api()?;
-        
+
         if let Some(ref token) = self.config.token {
             std::env::set_var("HF_TOKEN", token);
         }
@@ -402,18 +404,19 @@ impl HfResolver {
         ));
 
         let encoded_path = encode_path_segments(&parsed.path);
-        
+
         match repo.get(&encoded_path) {
             Ok(downloaded_path) => {
-                let bytes = std::fs::read(&downloaded_path)
-                    .with_context(|| format!("Failed to read downloaded file: {:?}", downloaded_path))?;
-                
+                let bytes = std::fs::read(&downloaded_path).with_context(|| {
+                    format!("Failed to read downloaded file: {downloaded_path:?}")
+                })?;
+
                 // Cache locally
                 if let Some(parent) = local_path.parent() {
                     std::fs::create_dir_all(parent).ok();
                 }
                 std::fs::write(&local_path, &bytes).ok();
-                
+
                 Ok(Some(bytes))
             }
             Err(e) => {
@@ -430,18 +433,21 @@ impl HfResolver {
                     }
                     Err(http_err) => {
                         if self.config.skip_missing {
-                            eprintln!("Skipping missing HF file: {} ({}, HTTP: {})", uri, e, http_err);
+                            eprintln!(
+                                "Skipping missing HF file: {uri} ({e}, HTTP: {http_err})"
+                            );
                             return Ok(None);
                         }
 
                         if is_image {
                             eprintln!(
-                                "Warning: Could not resolve {}, using zero tensor ({}x{}x{})",
-                                uri, DEFAULT_IMAGE_WIDTH, DEFAULT_IMAGE_HEIGHT, DEFAULT_IMAGE_CHANNELS
+                                "Warning: Could not resolve {uri}, using zero tensor ({DEFAULT_IMAGE_WIDTH}x{DEFAULT_IMAGE_HEIGHT}x{DEFAULT_IMAGE_CHANNELS})"
                             );
                             Ok(Some(vec![0u8; ZERO_IMAGE_SIZE]))
                         } else {
-                            Err(anyhow::anyhow!("Failed to download {} (API: {}, HTTP: {})", uri, e, http_err))
+                            Err(anyhow::anyhow!(
+                                "Failed to download {uri} (API: {e}, HTTP: {http_err})"
+                            ))
                         }
                     }
                 }
@@ -467,16 +473,11 @@ impl HfResolver {
         }
 
         let path_str = sanitized.to_string_lossy().to_string();
-        let candidates = [
-            path_str.clone(),
-            format!("data/{}", path_str),
-        ];
+        let candidates = [path_str.clone(), format!("data/{path_str}")];
 
         for candidate in &candidates {
-            match self.resolve(candidate, false) {
-                Ok(Some(bytes)) => return Ok(Some(bytes)),
-                Ok(None) => continue,
-                Err(_) => continue,
+            if let Ok(Some(bytes)) = self.resolve(candidate, false) {
+                return Ok(Some(bytes));
             }
         }
 
@@ -486,28 +487,28 @@ impl HfResolver {
         }
 
         if is_image {
-            eprintln!(
-                "Warning: Could not resolve {}, using zero tensor",
-                path
-            );
+            eprintln!("Warning: Could not resolve {path}, using zero tensor");
             Ok(Some(vec![0u8; ZERO_IMAGE_SIZE]))
         } else {
-            Err(anyhow::anyhow!("Failed to resolve asset: {}", path))
+            Err(anyhow::anyhow!("Failed to resolve asset: {path}"))
         }
     }
 
     /// Download bytes from a URL via HTTP
     fn download_via_http(url: &str) -> Result<Vec<u8>> {
         let client = get_http_client();
-        let response = client.get(url).send()
-            .with_context(|| format!("HTTP request failed for {}", url))?;
-        
+        let response = client
+            .get(url)
+            .send()
+            .with_context(|| format!("HTTP request failed for {url}"))?;
+
         if !response.status().is_success() {
             anyhow::bail!("HTTP {} fetching {}", response.status(), url);
         }
 
-        let bytes = response.bytes()
-            .with_context(|| format!("Failed to read response bytes from {}", url))?;
+        let bytes = response
+            .bytes()
+            .with_context(|| format!("Failed to read response bytes from {url}"))?;
         Ok(bytes.to_vec())
     }
 
@@ -526,7 +527,7 @@ impl HfResolver {
         // Check cache first
         if dest.exists() {
             return std::fs::read(&dest)
-                .with_context(|| format!("Failed to read cached URL file: {:?}", dest));
+                .with_context(|| format!("Failed to read cached URL file: {dest:?}"));
         }
 
         // Download
@@ -552,24 +553,21 @@ impl HfResolver {
     /// # Returns
     /// The file bytes, or None if skipped
     pub fn resolve_url_with_fallback(
-        url: &str, 
-        cache_dir: &Path, 
-        is_image: bool, 
-        skip_missing: bool
+        url: &str,
+        cache_dir: &Path,
+        is_image: bool,
+        skip_missing: bool,
     ) -> Result<Option<Vec<u8>>> {
         match Self::resolve_url(url, cache_dir) {
             Ok(bytes) => Ok(Some(bytes)),
             Err(e) => {
                 if skip_missing {
-                    eprintln!("Skipping failed URL: {} ({})", url, e);
+                    eprintln!("Skipping failed URL: {url} ({e})");
                     return Ok(None);
                 }
 
                 if is_image {
-                    eprintln!(
-                        "Warning: Could not download {}, using zero tensor",
-                        url
-                    );
+                    eprintln!("Warning: Could not download {url}, using zero tensor");
                     Ok(Some(vec![0u8; ZERO_IMAGE_SIZE]))
                 } else {
                     Err(e)
@@ -618,7 +616,7 @@ mod tests {
     #[test]
     fn test_zero_image_size() {
         assert_eq!(ZERO_IMAGE_SIZE, 224 * 224 * 3);
-        assert_eq!(ZERO_IMAGE_SIZE, 150528);
+        assert_eq!(ZERO_IMAGE_SIZE, 150_528);
     }
 
     #[test]
@@ -743,16 +741,34 @@ mod tests {
     #[test]
     fn test_encode_path_segments() {
         assert_eq!(encode_path_segments("simple/path"), "simple/path");
-        assert_eq!(encode_path_segments("path with spaces/file name.jpg"), "path%20with%20spaces/file%20name.jpg");
-        assert_eq!(encode_path_segments("special/chars#test"), "special/chars%23test");
+        assert_eq!(
+            encode_path_segments("path with spaces/file name.jpg"),
+            "path%20with%20spaces/file%20name.jpg"
+        );
+        assert_eq!(
+            encode_path_segments("special/chars#test"),
+            "special/chars%23test"
+        );
     }
 
     #[test]
     fn test_sanitize_path() {
-        assert_eq!(sanitize_path("normal/path/file.jpg"), PathBuf::from("normal/path/file.jpg"));
-        assert_eq!(sanitize_path("../../../etc/passwd"), PathBuf::from("etc/passwd"));
-        assert_eq!(sanitize_path("/absolute/path"), PathBuf::from("absolute/path"));
-        assert_eq!(sanitize_path("./relative/./path"), PathBuf::from("relative/path"));
+        assert_eq!(
+            sanitize_path("normal/path/file.jpg"),
+            PathBuf::from("normal/path/file.jpg")
+        );
+        assert_eq!(
+            sanitize_path("../../../etc/passwd"),
+            PathBuf::from("etc/passwd")
+        );
+        assert_eq!(
+            sanitize_path("/absolute/path"),
+            PathBuf::from("absolute/path")
+        );
+        assert_eq!(
+            sanitize_path("./relative/./path"),
+            PathBuf::from("relative/path")
+        );
         assert_eq!(sanitize_path(""), PathBuf::new());
     }
 
@@ -768,8 +784,14 @@ mod tests {
 
     #[test]
     fn test_filename_from_url() {
-        assert_eq!(filename_from_url("https://example.com/image.jpg"), "image.jpg");
-        assert_eq!(filename_from_url("https://example.com/path/to/file.png"), "file.png");
+        assert_eq!(
+            filename_from_url("https://example.com/image.jpg"),
+            "image.jpg"
+        );
+        assert_eq!(
+            filename_from_url("https://example.com/path/to/file.png"),
+            "file.png"
+        );
         // For URLs without a clear filename, should return a hash-based name
         let hash_name = filename_from_url("https://example.com/");
         assert!(hash_name.starts_with("file_"));
@@ -779,16 +801,11 @@ mod tests {
     #[test]
     fn test_resolve_hf_uri_skip_missing() {
         let temp = tempdir().unwrap();
-        let config = HfResolverConfig::new("test/dataset", temp.path())
-            .with_skip_missing(true);
+        let config = HfResolverConfig::new("test/dataset", temp.path()).with_skip_missing(true);
         let resolver = HfResolver::new(config);
 
         // Should return None for invalid URI when skip_missing is true
-        let result = resolver.resolve_hf_uri("not_a_valid_uri", false);
-        match result {
-            Ok(None) => {} // Expected
-            _ => {}        // Network issues acceptable
-        }
+        // (network issues also acceptable in tests)
+        let _ = resolver.resolve_hf_uri("not_a_valid_uri", false);
     }
 }
-

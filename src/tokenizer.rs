@@ -122,12 +122,12 @@ impl TikTokenTokenizer {
         let bos_id = bpe
             .encode_with_special_tokens("<|begin_of_text|>")
             .first()
-            .cloned()
+            .copied()
             .unwrap_or(0);
         let eos_id = bpe
             .encode_with_special_tokens("<|end_of_text|>")
             .first()
-            .cloned()
+            .copied()
             .unwrap_or(1);
 
         Ok(Self {
